@@ -1,10 +1,11 @@
 // Runs only when TEST_DATABASE_URL is set (docker compose up -d postgres).
 
 import { randomUUID } from 'node:crypto';
-import pg from 'pg';
+import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { budgetConfig } from '../../budget/src/governor.ts';
-import { migrate, PgReceiptStore, PgSpendLedger } from '../src/pg.ts';
+import { PgReceiptStore, PgSpendLedger } from '../src/pg.ts';
+import { freshDatabase } from '../src/testing.ts';
 
 const url = process.env.TEST_DATABASE_URL;
 
@@ -12,9 +13,7 @@ describe.skipIf(!url)('postgres receipts and spend ledger', () => {
   let pool: pg.Pool;
 
   beforeAll(async () => {
-    pool = new pg.Pool({ connectionString: url, max: 20 });
-    await pool.query('DROP TABLE IF EXISTS inference_spend, inference_calls, schema_migrations CASCADE');
-    await migrate(pool);
+    pool = await freshDatabase(url!, 'test_pg_ledger');
   });
   afterAll(async () => {
     await pool?.end();

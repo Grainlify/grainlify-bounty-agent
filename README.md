@@ -1,6 +1,6 @@
 # Grainlify bounty agent
 
-Grainlify's bounty agent funds open-source work. Creator fees from the project's token (TOKEN_TICKER, launched on ClawPump) flow into a treasury. The agent picks GitHub issues worth funding, prices them, posts bounties, and reviews the pull requests. When a maintainer merges, the contributor is paid on Solana.
+Grainlify's bounty agent funds open-source work. Creator fees from the project's token (GRAIN, launched on ClawPump) flow into a treasury. The agent picks GitHub issues worth funding, prices them, posts bounties, and reviews the pull requests. When a maintainer merges, the contributor is paid on Solana.
 
 Every reasoning step the agent takes is inference bought from [UsePod](https://usepod.ai), paid per request over **x402** from the agent's own wallet. Each call leaves a receipt linked to the bounty it served.
 
@@ -15,7 +15,11 @@ This is an entry for the AnsemHack Clawrena (Inference Markets and ClawPump × p
 | Inference budget governor (`packages/budget`) | $5.00 lifetime ceiling, per-phase allocations, and atomic reservations. |
 | Signer service (`services/signer`) | Separate process with its own spend journal and ceiling. It can only pay allowlisted UsePod quotes. |
 | Receipts and spend ledger (`packages/db`) | Postgres. |
-| Bounty loop: GitHub App, wallet linking, payout gate | Next (P2). |
+| Payout gate (`packages/gate`) | A deterministic function with 13 checks that fails closed. No model output is an input. |
+| Wallet linking | A signed `/grainlify link …` comment. GitHub proves the account and the signature proves the wallet. |
+| Human approval | Ed25519-signed by an approver key that never reaches the agent. It commits to recipient, amount, mint, network and bounty. |
+| Payout signer (`services/signer/src/payout`) | Separate key and journal. Pays only with a valid approval, and re-checks the merge on GitHub, its own repo allowlist, the $50/bounty and $150/day hard caps, and "paid once". |
+| Agent (`apps/agent`) | GitHub App webhooks (HMAC checked, delivery-deduped), bounty pricing and PR review over x402, gate on merge, approve CLI. |
 
 ## Money safety
 

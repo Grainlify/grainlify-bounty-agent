@@ -12,7 +12,11 @@
     "mock": "tsx packages/mock-gateway/src/main.ts",
     "signer": "tsx services/signer/src/main.ts",
     "spike": "tsx scripts/spike.ts",
-    "ledger": "tsx scripts/ledger.ts"
+    "ledger": "tsx scripts/ledger.ts",
+    "agent": "tsx apps/agent/src/main.ts",
+    "cli": "tsx apps/agent/src/cli.ts",
+    "approve": "tsx apps/agent/src/cli.ts approve",
+    "payout-signer": "tsx services/signer/src/payout/main.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.1",
