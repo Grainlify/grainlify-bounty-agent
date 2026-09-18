@@ -1,0 +1,40 @@
+// Runs only when TEST_DATABASE_URL is set (docker compose up -d postgres).
+
+import { randomUUID } from 'node:crypto';
+import pg from 'pg';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { budgetConfig } from '../../budget/src/governor.ts';
+import { migrate, PgReceiptStore, PgSpendLedger } from '../src/pg.ts';
+
+const url = process.env.TEST_DATABASE_URL;
+
+describe.skipIf(!url)('postgres receipts and spend ledger', () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: url, max: 20 });
+    await pool.query('DROP TABLE IF EXISTS inference_spend, inference_calls, schema_migrations CASCADE');
+    await migrate(pool);
+  });
+  afterAll(async () => {
+    await pool?.end();
+  });
+
+  it('round-trips a receipt through insert and update', async () => {
+    const store = new PgReceiptStore(pool);
+    const id = randomUUID();
+    await store.insert({ id, purpose: 'spike', phase: 'P1', model: 'gpt-oss-120b', path: '/proxy/x402/v1/chat/completions', links: { repo: 'a/b', issueNumber: 7 }, routingRequested: { mode: 'marketplace-only' }, maxTokens: 32, requestSha256: 'ab', status: 'quoting', createdAt: new Date() });
+    const rec = await store.update(id, { status: 'served', scheme: 'onchain', paidMicro: 35, feeMicro: 2_004, paymentResponse: { ok: true }, responseHeaders: { 'x-pod-route': 'marketplace' } });
+    expect(rec).toMatchObject({ id, status: 'served', paidMicro: 35, feeMicro: 2_004, links: { repo: 'a/b', issueNumber: 7 }, paymentResponse: { ok: true } });
+  });
+
+  it('never lets concurrent reservations cross the ceiling', async () => {
+    await pool.query('DELETE FROM inference_spend');
+    const ledger = new PgSpendLedger(pool, budgetConfig({ lifetimeCeilingMicro: 10_000 }));
+    const results = await Promise.all(Array.from({ length: 30 }, () => ledger.reserve({ phase: 'P1', kind: 'x402_payment', amountMicro: 1_000, callId: null })));
+    expect(results.filter((r) => r.decision.ok)).toHaveLength(10);
+    expect((await ledger.totals()).lifetimeMicro).toBe(10_000);
+    const refused = results.find((r) => !r.decision.ok)!;
+    expect(refused.decision).toMatchObject({ ok: false, code: 'ceiling_reached' });
+  });
+});

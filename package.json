@@ -1,0 +1,30 @@
+{
+  "name": "grainlify-bounty-agent",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "mock": "tsx packages/mock-gateway/src/main.ts",
+    "signer": "tsx services/signer/src/main.ts",
+    "spike": "tsx scripts/spike.ts",
+    "ledger": "tsx scripts/ledger.ts"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.1",
+    "@types/pg": "8.23.1",
+    "tsx": "4.23.13",
+    "typescript": "7.0.2",
+    "vitest": "5.0.1"
+  },
+  "dependencies": {
+    "@solana/spl-token": "0.4.15",
+    "@solana/web3.js": "1.99.0",
+    "bs58": "6.0.0",
+    "pg": "8.23.0"
+  }
+}

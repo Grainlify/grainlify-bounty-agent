@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+*.log
+
+# Secrets: nothing below is ever committed.
+.env
+.env.*
+!.env.example
+keys/
+secrets/
+*.keypair.json
+*-keypair.json
+id.json
+*.pem
+*.key
+
+# Local state
+data/
+*.sqlite
+*.sqlite-journal
+*.db
+
+# Eval data: anonymised production export, local only (never commit raw).
+eval/data/
+eval/raw/

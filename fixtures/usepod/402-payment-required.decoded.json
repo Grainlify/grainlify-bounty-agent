@@ -1,0 +1,71 @@
+{
+    "x402_version": 2,
+    "x402Version": 2,
+    "quote_id": "24c7f4e2-e113-41c5-89df-52fb2f93681e",
+    "resource": {
+        "description": "UsePod inference: gpt-4o-mini",
+        "mimeType": "application/json",
+        "url": "https://api.usepod.ai/proxy/x402/v1/chat/completions"
+    },
+    "accepts": [
+        {
+            "x402_version": 2,
+            "quote_id": "24c7f4e2-e113-41c5-89df-52fb2f93681e",
+            "scheme": "exact",
+            "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "pay_to": "GXfqVnZENHzvim8rNN8TPwqxWXQe8EBbxhcEMYE8Z7BS",
+            "asset": "USDC",
+            "amount_microunits": 35,
+            "mode": "cap-with-surplus-credit",
+            "expires_at": "2026-09-18T18:51:46.845387870Z",
+            "method": "POST",
+            "path": "/proxy/x402/v1/chat/completions",
+            "body_hash": "acc1daa91fd13097f50d999367dadcfe3f7063fc70a05f64bf0d8c4c2e707c7f",
+            "model": "gpt-4o-mini",
+            "balance_hint": "wallets with an x402 surplus balance may retry with scheme \"balance\": sign \"usepod-x402-spend:24c7f4e2-e113-41c5-89df-52fb2f93681e\" with the payer wallet and send it as payload.proof"
+        },
+        {
+            "x402_version": 2,
+            "quote_id": "24c7f4e2-e113-41c5-89df-52fb2f93681e",
+            "scheme": "exact",
+            "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+            "pay_to": "GXfqVnZENHzvim8rNN8TPwqxWXQe8EBbxhcEMYE8Z7BS",
+            "asset": "SOL",
+            "amount_microunits": 315,
+            "mode": "cap-with-surplus-credit",
+            "expires_at": "2026-09-18T18:51:46.845387870Z",
+            "method": "POST",
+            "path": "/proxy/x402/v1/chat/completions",
+            "body_hash": "acc1daa91fd13097f50d999367dadcfe3f7063fc70a05f64bf0d8c4c2e707c7f",
+            "model": "gpt-4o-mini"
+        },
+        {
+            "x402_version": 2,
+            "quote_id": "24c7f4e2-e113-41c5-89df-52fb2f93681e",
+            "scheme": "exact",
+            "network": "eip155:8453",
+            "pay_to": "0x8715CBcE377293F83805F4B60F1490a6DC9DF19C",
+            "asset": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+            "amount_microunits": 35,
+            "mode": "exact",
+            "expires_at": "2026-09-18T18:51:46.845387870Z",
+            "method": "POST",
+            "path": "/proxy/x402/v1/chat/completions",
+            "body_hash": "acc1daa91fd13097f50d999367dadcfe3f7063fc70a05f64bf0d8c4c2e707c7f",
+            "model": "gpt-4o-mini",
+            "x402Version": 2,
+            "amount": "35",
+            "maxAmountRequired": "35",
+            "payTo": "0x8715CBcE377293F83805F4B60F1490a6DC9DF19C",
+            "maxTimeoutSeconds": 300,
+            "resource": "https://api.usepod.ai/proxy/x402/v1/chat/completions",
+            "description": "UsePod inference: gpt-4o-mini",
+            "mimeType": "application/json",
+            "extra": {
+                "name": "USD Coin",
+                "version": "2"
+            }
+        }
+    ],
+    "extensions": {}
+}
