@@ -50,6 +50,11 @@ export class BountyService {
     return `\`${r.model}\` via UsePod x402, quote \`${r.quoteId}\`, ${how}`;
   }
 
+  /** On anything but mainnet the tokens are worthless test tokens; say so everywhere. */
+  private currencyLabel(currency: string, network: string) {
+    return network === 'solana-mainnet' ? currency : `test ${currency}`;
+  }
+
   async repo(fullName: string) {
     const [owner, name] = fullName.split('/');
     const r = await this.d.db.query(`SELECT * FROM repos WHERE lower(owner) = lower($1) AND lower(name) = lower($2)`, [owner, name]);
@@ -98,12 +103,13 @@ export class BountyService {
       [bountyId, repo.id, issueNumber, amount.toString(), currency, mint.mint, this.d.cfg.network, record.id, JSON.stringify(pricing), createdBy],
     );
 
+    const label = this.currencyLabel(currency, this.d.cfg.network);
     const testNote = this.d.cfg.network === 'solana-mainnet' ? '' : `\n\n> **Test bounty on ${this.d.cfg.network}.** It pays test tokens with no real value.`;
     const body = [
-      `### Bounty: ${formatAmount(amount, mint.decimals, currency)}`,
+      `### Bounty: ${formatAmount(amount, mint.decimals, label)}`,
       testNote,
       `\n**How to claim**`,
-      `1. Link your Solana wallet once: sign the message at ${this.d.cfg.linkPageUrl} and post the \`/grainlify link …\` line it gives you as a comment here.`,
+      `1. Link your Solana wallet once (instructions: ${this.d.cfg.linkPageUrl}) and post the \`/grainlify link …\` line as a comment here.`,
       `2. Open a pull request that says \`Closes #${issueNumber}\`.`,
       `3. When a maintainer merges it, the payout goes to a human for approval, then to your wallet.`,
       `\n**Rules:** one wallet per GitHub account; accounts must be at least ${this.d.cfg.gate.minAccountAgeDays} days old; self-merged PRs are not paid; one payout per bounty.`,
@@ -326,7 +332,7 @@ export class BountyService {
     await this.d.gh.comment(
       view.terms.repo,
       view.terms.pr_number,
-      `### Paid\n${formatAmount(BigInt(view.terms.amount_minor), mint?.decimals ?? 6, view.terms.currency)} sent to \`${view.terms.recipient}\` for #${view.terms.issue_number}.\nTransaction: ${explorerTx(view.terms.network, res.signature)}${FOOTER}`,
+      `### Paid\n${formatAmount(BigInt(view.terms.amount_minor), mint?.decimals ?? 6, this.currencyLabel(view.terms.currency, view.terms.network))} sent to \`${view.terms.recipient}\` for #${view.terms.issue_number}.\nTransaction: ${explorerTx(view.terms.network, res.signature)}${FOOTER}`,
     );
     return { signature: res.signature };
   }

@@ -153,7 +153,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     // 1. A maintainer picks the issue; one x402 call prices it; the bounty is posted.
     const proposed = await service.proposeBounty(REPO, 1, 'maintainer');
     expect(proposed.amount).toBe(20_000_000n); // mock suggests $20, inside the $5-$50 range
-    expect(gh.comments.at(-1)!.body).toMatch(/### Bounty: 20 USDC/);
+    expect(gh.comments.at(-1)!.body).toMatch(/### Bounty: 20 test USDC/);
     expect(gh.comments.at(-1)!.body).toMatch(/mock gateway \(test run, no real payment\)/);
 
     // 2. The contributor links a wallet by signed comment.
