@@ -76,3 +76,26 @@ DATABASE_URL=… pnpm ledger                  # spend vs allocation
 ```
 
 `pnpm spike` refuses to call the real gateway unless `SPIKE_CONFIRM=spend-real-money` is set.
+
+## Running the P2 loop on devnet
+
+P2 pays **devnet test USDC only**. That is a mint we created, with no value. All inference goes to the local mock gateway. Keys live in `~/.config/grainlify-bounty-agent/`, never in this repo.
+
+### Steps
+
+1. **Test token.** Create the test token and fund the payout float. The mint authority needs devnet SOL first.
+   ```
+   pnpm tsx scripts/test-usdc-setup.ts https://api.devnet.solana.com <mint-authority.json> <payout-float-pubkey>
+   ```
+2. **Processes.** Start them, each in its own shell:
+   - `pnpm mock`
+   - `SIGNER_RAIL=mock pnpm signer`
+   - `PAYOUT_NETWORK=solana-devnet … pnpm payout-signer`
+   - `pnpm agent`
+   - `npx smee-client --url <smee channel> --target http://127.0.0.1:3000/github/webhook`
+3. **Allowlist the sandbox repo.** `pnpm cli repo add Grainlify/grainlify-agent-sandbox`
+4. **Post a bounty.** `pnpm cli bounty propose Grainlify/grainlify-agent-sandbox <issue>`
+5. **Contributor steps.**
+   - Link a wallet with `pnpm tsx scripts/sign-link.ts <login> <keypair>` and post the output as a comment.
+   - Open a PR that says `Closes #<issue>`.
+6. **Merge and approve.** A maintainer merges, then `pnpm approve <payout-id>`.
