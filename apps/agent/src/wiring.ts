@@ -27,8 +27,13 @@ export async function wire() {
   const db = new pg.Pool({ connectionString: need('DATABASE_URL') });
   await migrate(db);
   await bindLedgerMode(db, live ? 'live' : 'mock');
-  const app = JSON.parse(readFileSync(need('GITHUB_APP_CONFIG'), 'utf8')) as { id: number; webhook_secret: string };
-  const gh = new GitHubAppClient(app.id, readFileSync(need('GITHUB_APP_PRIVATE_KEY'), 'utf8'));
+  // Hosted: individual secret variables. Local: the files the manifest flow wrote.
+  const app = env.GITHUB_APP_ID
+    ? { id: Number(env.GITHUB_APP_ID), webhook_secret: need('GITHUB_WEBHOOK_SECRET') }
+    : (JSON.parse(readFileSync(need('GITHUB_APP_CONFIG'), 'utf8')) as { id: number; webhook_secret: string });
+  const pem = env.GITHUB_APP_PRIVATE_KEY_PEM ?? readFileSync(need('GITHUB_APP_PRIVATE_KEY'), 'utf8');
+  if (!app.webhook_secret || app.webhook_secret.length < 32) throw new Error('webhook secret missing or too short');
+  const gh = new GitHubAppClient(app.id, pem);
   const phase = (env.INFERENCE_PHASE ?? 'P2P3') as Phase;
   if (!PHASES.includes(phase)) throw new Error(`bad INFERENCE_PHASE ${phase}`);
 

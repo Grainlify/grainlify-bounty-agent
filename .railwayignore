@@ -1,0 +1,12 @@
+node_modules
+data
+coverage
+.git
+.env
+.env.*
+keys
+secrets
+*.keypair.json
+*.pem
+# The wallet-link page is not approved yet; it is never deployed.
+docs/link

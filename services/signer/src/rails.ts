@@ -25,10 +25,25 @@ export interface PaymentRail {
   prepareUsdcTransfer(args: { to: string; amountMicro: number }): Promise<{ signature: string; broadcast: () => Promise<TransferResult> }>;
 }
 
-/** A 64-byte Solana secret key (solana-keygen JSON format) as a Node KeyObject. */
+/** A 64-byte Solana secret key in solana-keygen JSON format, read from a file. */
 export function loadSolanaKeypair(path: string): { secret: Uint8Array; publicKey: Uint8Array } {
-  const raw = JSON.parse(readFileSync(path, 'utf8')) as number[];
-  if (!Array.isArray(raw) || raw.length !== 64) throw new Error(`${path} is not a 64-byte Solana keypair file`);
+  return parseSolanaKeypair(readFileSync(path, 'utf8'), path);
+}
+
+/**
+ * Loads a keypair from `<PREFIX>_JSON` (hosted: a secret variable) or, failing
+ * that, from the file at `<PREFIX>_PATH`. Returns null if neither is set.
+ */
+export function keypairFromEnv(env: NodeJS.ProcessEnv, prefix: string): { secret: Uint8Array; publicKey: Uint8Array } | null {
+  const json = env[`${prefix}_JSON`];
+  if (json) return parseSolanaKeypair(json, `${prefix}_JSON`);
+  const path = env[`${prefix}_PATH`];
+  return path ? loadSolanaKeypair(path) : null;
+}
+
+function parseSolanaKeypair(text: string, source: string): { secret: Uint8Array; publicKey: Uint8Array } {
+  const raw = JSON.parse(text) as number[];
+  if (!Array.isArray(raw) || raw.length !== 64) throw new Error(`${source} is not a 64-byte Solana keypair`);
   const secret = Uint8Array.from(raw);
   return { secret, publicKey: secret.slice(32) };
 }
