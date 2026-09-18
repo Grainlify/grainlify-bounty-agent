@@ -20,5 +20,6 @@ P3 does not start until every box is checked and the P1 report is in.
   - A new payout float keypair (mainnet), separate from the inference wallet and from the treasury.
 - [ ] **Agent gate allows `solana-mainnet`.** Mainnet is not in `allowedNetworks` today, so the gate refuses it.
 - [ ] **Payout float funded by the maintainer** (about $15 USDC + 0.05 SOL). Only its public address is shared.
+- [ ] **Live inference uses a fresh ledger database and a fresh signer journal.** The P2 database (`agent_p2`) and `data/p2/inference-journal.sqlite` record mock payments ($0.013525 of pretend money). If they were reused, that mock spend would count against the real $5.00 budget, and mock and real receipts would sit side by side. Point `DATABASE_URL` and `SIGNER_JOURNAL_PATH` at new ones.
 - [ ] **Caps unchanged:** $50 per bounty, $150/day, and manual approval for every payout.
 - [ ] **Allowlist moves to Grainlify org repos** only after the webhook item above.
