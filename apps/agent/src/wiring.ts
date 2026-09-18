@@ -3,7 +3,7 @@
 import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { budgetConfig, PHASES, type Phase } from '../../../packages/budget/src/governor.ts';
-import { migrate, PgReceiptStore, PgSpendLedger } from '../../../packages/db/src/pg.ts';
+import { bindLedgerMode, migrate, PgReceiptStore, PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { X402Client } from '../../../packages/x402/src/client.ts';
 import { SignerClient } from '../../../services/signer/src/client.ts';
 import { p2Config } from './config.ts';
@@ -26,6 +26,7 @@ export async function wire() {
 
   const db = new pg.Pool({ connectionString: need('DATABASE_URL') });
   await migrate(db);
+  await bindLedgerMode(db, live ? 'live' : 'mock');
   const app = JSON.parse(readFileSync(need('GITHUB_APP_CONFIG'), 'utf8')) as { id: number; webhook_secret: string };
   const gh = new GitHubAppClient(app.id, readFileSync(need('GITHUB_APP_PRIVATE_KEY'), 'utf8'));
   const phase = (env.INFERENCE_PHASE ?? 'P2P3') as Phase;

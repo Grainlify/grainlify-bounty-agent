@@ -31,7 +31,7 @@ if (railKind === 'solana') {
 }
 
 const cfg = signerConfig(env);
-const signer = new Signer(cfg, new Journal(journalPath), rail);
+const signer = new Signer(cfg, new Journal(journalPath, rail.kind), rail);
 createSignerServer(signer, token).listen(port, '127.0.0.1', () => {
   console.log(`signer (${rail.kind}) ${signer.address()} on 127.0.0.1:${port}; ceiling ${cfg.lifetimeCeilingMicro} micro-USD, per-call max ${cfg.maxPerCallMicro}`);
 });

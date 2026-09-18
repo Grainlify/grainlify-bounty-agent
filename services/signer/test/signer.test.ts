@@ -38,7 +38,7 @@ class FakeRail implements PaymentRail {
 }
 
 function setup(env: Record<string, string> = {}) {
-  const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'signer-')), 'j.sqlite'));
+  const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'signer-')), 'j.sqlite'), 'mock');
   const rail = new FakeRail();
   const signer = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400', ...env }), journal, rail);
   return { journal, rail, signer };
@@ -116,5 +116,27 @@ describe('signer policy', () => {
     const { signer } = setup();
     const id = quoteId();
     expect(signer.balanceProof(id)).toMatchObject({ ok: true, proof: `signed:usepod-x402-spend:${id}` });
+  });
+});
+
+describe('journal mode binding', () => {
+  it('refuses to back a real signer with a journal of mock payments, and vice versa', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'bind-')), 'j.sqlite');
+    new Journal(path, 'mock').close();
+    expect(() => new Journal(path, 'solana')).toThrow(/mock journal/);
+    const live = join(mkdtempSync(join(tmpdir(), 'bind-')), 'j.sqlite');
+    new Journal(live, 'solana').close();
+    expect(() => new Journal(live, 'mock')).toThrow(/solana journal/);
+  });
+
+  it('refuses a pre-binding journal that already has payments instead of guessing its rail', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const path = join(mkdtempSync(join(tmpdir(), 'bind-')), 'j.sqlite');
+    new Journal(path, 'mock').close();
+    const raw = new DatabaseSync(path);
+    raw.exec(`DELETE FROM journal_meta; INSERT INTO inference_payments (quote_id, pay_to, amount_micro, fee_reserve_micro, status) VALUES ('q', 'x', 1, 0, 'confirmed')`);
+    raw.close();
+    expect(() => new Journal(path, 'solana')).toThrow(/refusing to guess/);
+    expect(() => new Journal(path, 'mock')).toThrow(/refusing to guess/);
   });
 });

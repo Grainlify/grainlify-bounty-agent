@@ -30,6 +30,22 @@ export async function migrate(pool: pg.Pool, dir = join(import.meta.dirname, '..
   }
 }
 
+export type LedgerMode = 'mock' | 'live';
+
+/**
+ * Binds this database to mock or live money on first use and refuses the
+ * other mode afterwards. A ledger that ever recorded mock payments can never
+ * be counted against the real budget, and vice versa.
+ */
+export async function bindLedgerMode(pool: pg.Pool, mode: LedgerMode): Promise<void> {
+  await pool.query(`INSERT INTO ledger_meta (mode) VALUES ($1) ON CONFLICT (singleton) DO NOTHING`, [mode]);
+  const r = await pool.query(`SELECT mode FROM ledger_meta`);
+  const bound = r.rows[0]?.mode as LedgerMode | undefined;
+  if (bound !== mode) {
+    throw new Error(`this database is a ${bound} ledger; ${mode} inference needs its own database (never mix mock and real spend)`);
+  }
+}
+
 const COLS: [keyof InferenceCallRecord, string][] = [
   ['id', 'id'], ['purpose', 'purpose'], ['phase', 'phase'], ['model', 'model'], ['path', 'path'], ['links', 'links'],
   ['routingRequested', 'routing_requested'], ['maxTokens', 'max_tokens'], ['requestSha256', 'request_sha256'], ['status', 'status'],

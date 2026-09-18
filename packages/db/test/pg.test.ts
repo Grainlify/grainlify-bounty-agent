@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { budgetConfig } from '../../budget/src/governor.ts';
-import { PgReceiptStore, PgSpendLedger } from '../src/pg.ts';
+import { bindLedgerMode, PgReceiptStore, PgSpendLedger } from '../src/pg.ts';
 import { freshDatabase } from '../src/testing.ts';
 
 const url = process.env.TEST_DATABASE_URL;
@@ -35,5 +35,17 @@ describe.skipIf(!url)('postgres receipts and spend ledger', () => {
     expect((await ledger.totals()).lifetimeMicro).toBe(10_000);
     const refused = results.find((r) => !r.decision.ok)!;
     expect(refused.decision).toMatchObject({ ok: false, code: 'ceiling_reached' });
+  });
+
+  it('binds a database to mock or live money once and refuses the other mode', async () => {
+    const mockDb = await freshDatabase(url!, 'test_ledger_mode_mock');
+    await bindLedgerMode(mockDb, 'mock');
+    await bindLedgerMode(mockDb, 'mock'); // idempotent
+    await expect(bindLedgerMode(mockDb, 'live')).rejects.toThrow(/mock ledger/);
+    await mockDb.end();
+    const liveDb = await freshDatabase(url!, 'test_ledger_mode_live');
+    await bindLedgerMode(liveDb, 'live');
+    await expect(bindLedgerMode(liveDb, 'mock')).rejects.toThrow(/live ledger/);
+    await liveDb.end();
   });
 });

@@ -30,7 +30,11 @@ export interface PaymentRow {
 export class Journal {
   private db: DatabaseSync;
 
-  constructor(path: string) {
+  /**
+   * `rail` binds the journal file to mock or real payments on first open; a
+   * journal of mock payments can never back a real signer, or vice versa.
+   */
+  constructor(path: string, rail: 'mock' | 'solana') {
     this.db = new DatabaseSync(path);
     this.db.exec(`
       PRAGMA journal_mode = WAL;
@@ -48,12 +52,24 @@ export class Journal {
         created_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
         updated_at        TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
+      CREATE TABLE IF NOT EXISTS journal_meta (
+        singleton  INTEGER PRIMARY KEY CHECK (singleton = 1),
+        rail       TEXT NOT NULL CHECK (rail IN ('mock','solana')),
+        created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+      );
       CREATE TABLE IF NOT EXISTS balance_proofs (
         id         INTEGER PRIMARY KEY AUTOINCREMENT,
         quote_id   TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
     `);
+    const unbound = !this.db.prepare(`SELECT 1 FROM journal_meta`).get();
+    const hasPayments = !!this.db.prepare(`SELECT 1 FROM inference_payments LIMIT 1`).get();
+    // A journal from before binding existed, with payments in it: we can't tell mock from real, so refuse.
+    if (unbound && hasPayments) throw new Error(`${path} has payments but no recorded rail; refusing to guess whether they were mock or real`);
+    this.db.prepare(`INSERT OR IGNORE INTO journal_meta (singleton, rail) VALUES (1, ?)`).run(rail);
+    const bound = (this.db.prepare(`SELECT rail FROM journal_meta`).get() as { rail: string }).rail;
+    if (bound !== rail) throw new Error(`${path} is a ${bound} journal; a ${rail} signer needs its own journal file`);
   }
 
   /** Micro-USD this journal counts as spent or possibly spent. */

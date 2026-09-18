@@ -15,7 +15,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import pg from 'pg';
 import { budgetConfig, fmt, PHASE_ALLOCATION_MICRO } from '../packages/budget/src/governor.ts';
-import { migrate, PgReceiptStore, PgSpendLedger } from '../packages/db/src/pg.ts';
+import { bindLedgerMode, migrate, PgReceiptStore, PgSpendLedger } from '../packages/db/src/pg.ts';
 import { X402CallFailed, X402Client, type CallRequest, type RoutingRequest } from '../packages/x402/src/client.ts';
 import { X402_PATHS } from '../packages/x402/src/protocol.ts';
 import { SignerClient } from '../services/signer/src/client.ts';
@@ -30,6 +30,7 @@ if (real && env.SPIKE_CONFIRM !== 'spend-real-money') {
 
 const pool = new pg.Pool({ connectionString: env.DATABASE_URL });
 await migrate(pool);
+await bindLedgerMode(pool, real ? 'live' : 'mock');
 const ledger = new PgSpendLedger(pool, budgetConfig({ lifetimeCeilingMicro: env.INFERENCE_LIFETIME_CEILING_MICRO ? Number(env.INFERENCE_LIFETIME_CEILING_MICRO) : undefined }));
 const receipts = new PgReceiptStore(pool);
 const signer = new SignerClient(env.SIGNER_URL ?? 'http://127.0.0.1:8787', env.SIGNER_TOKEN ?? '');

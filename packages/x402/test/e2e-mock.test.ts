@@ -34,7 +34,7 @@ async function listen(s: Server) {
 async function harness(o: { mock?: MockOptions; signerEnv?: Record<string, string>; agentCeiling?: number; prefundMicro?: number } = {}) {
   const gw = createMockGateway(o.mock);
   const gatewayUrl = await listen(gw.server);
-  const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'e2e-')), 'j.sqlite'));
+  const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'e2e-')), 'j.sqlite'), 'mock');
   const signer = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400', ...o.signerEnv }), journal, new MockRail(gatewayUrl));
   const signerUrl = await listen(createSignerServer(signer, TOKEN));
   const ledger = new InMemorySpendLedger(budgetConfig({ lifetimeCeilingMicro: o.agentCeiling }));

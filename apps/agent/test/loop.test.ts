@@ -85,7 +85,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     db = await freshDatabase(dbUrl!, 'test_agent_loop');
     const gw = createMockGateway({ responder: bountyResponder });
     const gatewayUrl = await listen(gw.server);
-    inferenceJournal = new Journal(join(mkdtempSync(join(tmpdir(), 'loop-')), 'inference.sqlite'));
+    inferenceJournal = new Journal(join(mkdtempSync(join(tmpdir(), 'loop-')), 'inference.sqlite'), 'mock');
     const inferenceSigner = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400' }), inferenceJournal, new MockRail(gatewayUrl));
     const inferenceSignerUrl = await listen(createSignerServer(inferenceSigner, TOKEN));
 
