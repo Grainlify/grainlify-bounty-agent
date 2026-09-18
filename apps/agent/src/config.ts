@@ -33,6 +33,14 @@ export function formatAmount(minor: bigint, decimals: number, currency: string):
   return `${whole}${frac ? `.${frac}` : ''} ${currency}`;
 }
 
+/**
+ * Networks the gate lets payouts use. Mainnet is off unless explicitly switched
+ * on; the payout signer has its own, separate switch (PAYOUT_ALLOW_MAINNET).
+ */
+export function allowedPayoutNetworks(env: { GATE_ALLOW_MAINNET?: string }): string[] {
+  return env.GATE_ALLOW_MAINNET === 'yes' ? ['solana-mainnet'] : ['solana-devnet', 'localnet'];
+}
+
 /** P2 defaults: devnet only, hackathon caps, manual approval for every payout. */
 export function p2Config(over: Partial<AgentConfig> & Pick<AgentConfig, 'mints' | 'trustedApprovers'>): AgentConfig {
   return {

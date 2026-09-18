@@ -6,7 +6,7 @@ import { budgetConfig, PHASES, type Phase } from '../../../packages/budget/src/g
 import { bindLedgerMode, migrate, PgReceiptStore, PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { X402Client } from '../../../packages/x402/src/client.ts';
 import { SignerClient } from '../../../services/signer/src/client.ts';
-import { p2Config } from './config.ts';
+import { allowedPayoutNetworks, p2Config } from './config.ts';
 import { GitHubAppClient } from './github.ts';
 import { PayoutSignerClient } from './payout-client.ts';
 import { BountyService } from './service.ts';
@@ -43,8 +43,13 @@ export async function wire() {
     ledger: new PgSpendLedger(db, budgetConfig({ lifetimeCeilingMicro: env.INFERENCE_LIFETIME_CEILING_MICRO ? Number(env.INFERENCE_LIFETIME_CEILING_MICRO) : undefined })),
     receipts: new PgReceiptStore(db),
   });
+  const network = env.PAYOUT_NETWORK ?? 'solana-devnet';
+  const allowedNetworks = allowedPayoutNetworks(env);
+  if (!allowedNetworks.includes(network)) throw new Error(`PAYOUT_NETWORK=${network} is not allowed (mainnet needs GATE_ALLOW_MAINNET=yes)`);
+  const base = p2Config({ mints: {}, trustedApprovers: [] });
   const cfg = p2Config({
-    network: env.PAYOUT_NETWORK ?? 'solana-devnet',
+    gate: { ...base.gate, allowedNetworks },
+    network,
     mints: JSON.parse(need('PAYOUT_MINTS')) as Record<string, { mint: string; decimals: number }>,
     trustedApprovers: need('APPROVER_PUBKEYS').split(',').map((s) => s.trim()).filter(Boolean),
     inferencePhase: phase,
