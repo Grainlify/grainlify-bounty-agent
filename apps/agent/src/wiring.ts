@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { budgetConfig, PHASES, type Phase } from '../../../packages/budget/src/governor.ts';
 import { bindLedgerMode, migrate, PgReceiptStore, PgSpendLedger } from '../../../packages/db/src/pg.ts';
+import { importDevnetRun } from '../../../packages/db/src/devnet-import.ts';
 import { X402Client } from '../../../packages/x402/src/client.ts';
 import { SignerClient } from '../../../services/signer/src/client.ts';
 import { allowedPayoutNetworks, p2Config } from './config.ts';
@@ -28,6 +29,7 @@ export async function wire() {
   const db = new pg.Pool({ connectionString: need('DATABASE_URL') });
   await migrate(db);
   await bindLedgerMode(db, live ? 'live' : 'mock');
+  await importDevnetRun(db, env.DEVNET_IMPORT_B64);
   // Hosted: individual secret variables. Local: the files the manifest flow wrote.
   const app = env.GITHUB_APP_ID
     ? { id: Number(env.GITHUB_APP_ID), webhook_secret: need('GITHUB_WEBHOOK_SECRET') }
