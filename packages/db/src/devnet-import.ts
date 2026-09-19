@@ -11,7 +11,8 @@ const ALLOWED = /^INSERT INTO public\.(repos|contributors|wallet_links|inference
 
 export async function importDevnetRun(db: pg.Pool, b64: string | undefined, log: (m: string) => void = console.log) {
   if (!b64) return;
-  const statements = Buffer.from(b64, 'base64').toString('utf8').split('\n').filter(Boolean);
+  // Split at statement starts, not lines: values (a signed link message) contain newlines.
+  const statements = Buffer.from(b64, 'base64').toString('utf8').split(/\n(?=INSERT INTO )/).map((x) => x.trim()).filter(Boolean);
   const bad = statements.find((s) => !ALLOWED.test(s));
   if (bad) throw new Error(`devnet import refused: unexpected statement ${bad.slice(0, 60)}`);
   const client = await db.connect();

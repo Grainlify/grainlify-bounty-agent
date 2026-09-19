@@ -19,6 +19,14 @@ describe.skipIf(!url)('devnet import', () => {
     expect((await db.query('SELECT count(*)::int n FROM repos')).rows[0].n).toBe(1);
   });
 
+  it('keeps multi-line values intact', async () => {
+    const db = await freshDatabase(url!, 'test_import_multiline'); pools.push(db);
+    await bindLedgerMode(db, 'mock');
+    const two = repo + "\nINSERT INTO public.contributors (github_user_id, login, account_created_at, is_bot, first_seen) VALUES (9, 'line one\nline two', now(), false, now());";
+    await importDevnetRun(db, b64(two), () => {});
+    expect((await db.query('SELECT login FROM contributors')).rows[0].login).toBe('line one\nline two');
+  });
+
   it('refuses a live-bound database', async () => {
     const db = await freshDatabase(url!, 'test_import_live'); pools.push(db);
     await bindLedgerMode(db, 'live');

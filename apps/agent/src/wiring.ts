@@ -29,7 +29,8 @@ export async function wire() {
   const db = new pg.Pool({ connectionString: need('DATABASE_URL') });
   await migrate(db);
   await bindLedgerMode(db, live ? 'live' : 'mock');
-  await importDevnetRun(db, env.DEVNET_IMPORT_B64);
+  // Optional and one-shot: a failed import is logged, never allowed to stop the agent.
+  await importDevnetRun(db, env.DEVNET_IMPORT_B64).catch((e) => console.error('devnet import failed, continuing:', e instanceof Error ? e.message : e));
   // Hosted: individual secret variables. Local: the files the manifest flow wrote.
   const app = env.GITHUB_APP_ID
     ? { id: Number(env.GITHUB_APP_ID), webhook_secret: need('GITHUB_WEBHOOK_SECRET') }
