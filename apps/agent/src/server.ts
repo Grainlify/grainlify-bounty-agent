@@ -1,13 +1,12 @@
-// HTTP surface of the agent: the GitHub webhook, the wallet-link page, and a
-// small payouts API used by the approve command.
+// HTTP surface of the agent: the GitHub webhook, the read-only public API
+// for grainlify.com, and a small payouts API used by the approve command.
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
-import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
-import { join } from 'node:path';
 import type pg from 'pg';
 import type { Approval } from '../../../packages/gate/src/approval.ts';
 import type { BountyService } from './service.ts';
+import { corsHeaders, type PublicApi } from './public.ts';
 
 export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
   if (!header?.startsWith('sha256=')) return false;
@@ -20,10 +19,11 @@ export interface ServerDeps {
   db: pg.Pool;
   service: BountyService;
   webhookSecret: string;
+  publicApi?: PublicApi;
+  /** Browser origins allowed to read /public/*. */
+  publicOrigins?: string[];
   onError?: (e: unknown) => void;
 }
-
-const linkPage = () => readFileSync(join(import.meta.dirname, '../../../docs/link/index.html'), 'utf8');
 
 export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise<void> } {
   const inflight = new Set<Promise<void>>();
@@ -55,7 +55,28 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       const url = new URL(req.url ?? '/', 'http://agent');
 
       if (req.method === 'GET' && url.pathname === '/health') return send(200, { ok: true });
-      if (req.method === 'GET' && (url.pathname === '/link' || url.pathname === '/link/')) return send(200, linkPage(), 'text/html; charset=utf-8');
+
+      if (url.pathname.startsWith('/public/') && d.publicApi) {
+        const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? []);
+        const pub = (status: number, body: unknown) => {
+          res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'public, max-age=15', ...cors });
+          res.end(JSON.stringify(body));
+        };
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, cors);
+          return res.end();
+        }
+        if (req.method !== 'GET') return pub(405, { error: 'read-only' });
+        if (url.pathname === '/public/status') return pub(200, d.publicApi.status());
+        if (url.pathname === '/public/ledger') return pub(200, await d.publicApi.ledger());
+        if (url.pathname === '/public/bounties') return pub(200, { status: d.publicApi.status(), bounties: await d.publicApi.bounties() });
+        const b = /^\/public\/bounties\/([0-9a-f-]{36})$/.exec(url.pathname);
+        if (b) {
+          const [one] = await d.publicApi.bounties(b[1]);
+          return one ? pub(200, { status: d.publicApi.status(), bounty: one }) : pub(404, { error: 'not found' });
+        }
+        return pub(404, { error: 'not found' });
+      }
 
       if (req.method === 'POST' && url.pathname === '/github/webhook') {
         const raw = await readRaw(req, 5 * 1024 * 1024);

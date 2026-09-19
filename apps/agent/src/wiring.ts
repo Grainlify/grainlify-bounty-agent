@@ -10,6 +10,7 @@ import { allowedPayoutNetworks, p2Config } from './config.ts';
 import { GitHubAppClient } from './github.ts';
 import { PayoutSignerClient } from './payout-client.ts';
 import { BountyService } from './service.ts';
+import { PublicApi, publicOrigins } from './public.ts';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -57,5 +58,5 @@ export async function wire() {
     ...(env.LINK_PAGE_URL ? { linkPageUrl: env.LINK_PAGE_URL } : {}),
   });
   const service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(need('PAYOUT_SIGNER_URL'), need('PAYOUT_SIGNER_TOKEN')), cfg });
-  return { db, gh, service, cfg, webhookSecret: app.webhook_secret };
+  return { db, gh, service, cfg, webhookSecret: app.webhook_secret, publicApi: new PublicApi(db, cfg), publicOrigins: publicOrigins(env) };
 }

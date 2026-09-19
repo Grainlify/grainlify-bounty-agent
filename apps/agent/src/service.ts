@@ -98,9 +98,9 @@ export class BountyService {
     const amount = clampPriceMinor(pricing.suggested_usd, this.d.cfg.priceRangeUsd.min, this.d.cfg.priceRangeUsd.max, mint.decimals);
 
     await this.d.db.query(
-      `INSERT INTO bounties (id, repo_id, issue_number, amount_minor, currency, mint, network, status, price_call_id, pricing, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'proposed', $8, $9, $10)`,
-      [bountyId, repo.id, issueNumber, amount.toString(), currency, mint.mint, this.d.cfg.network, record.id, JSON.stringify(pricing), createdBy],
+      `INSERT INTO bounties (id, repo_id, issue_number, issue_title, amount_minor, currency, mint, network, status, price_call_id, pricing, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'proposed', $9, $10, $11)`,
+      [bountyId, repo.id, issueNumber, issue.title.slice(0, 300), amount.toString(), currency, mint.mint, this.d.cfg.network, record.id, JSON.stringify(pricing), createdBy],
     );
 
     const label = this.currencyLabel(currency, this.d.cfg.network);

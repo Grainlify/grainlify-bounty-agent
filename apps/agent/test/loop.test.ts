@@ -33,6 +33,7 @@ import { p2Config } from '../src/config.ts';
 import { PayoutSignerClient } from '../src/payout-client.ts';
 import { createAgentServer } from '../src/server.ts';
 import { BountyService } from '../src/service.ts';
+import { PublicApi } from '../src/public.ts';
 import { FakeGitHub } from './fake-github.ts';
 
 const dbUrl = process.env.TEST_DATABASE_URL;
@@ -110,11 +111,9 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
       receipts: new PgReceiptStore(db),
       sleep: async () => {},
     });
-    service = new BountyService({
-      db, gh, x402, payoutSigner: new PayoutSignerClient(payoutUrl, TOKEN),
-      cfg: p2Config({ mints: { USDC: { mint: MINT, decimals: 6 } }, trustedApprovers: [approver.publicKey.toBase58()] }),
-    });
-    agent = createAgentServer({ db, service, webhookSecret: SECRET, onError: (e) => console.error(e) });
+    const cfg = p2Config({ mints: { USDC: { mint: MINT, decimals: 6 } }, trustedApprovers: [approver.publicKey.toBase58()] });
+    service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(payoutUrl, TOKEN), cfg });
+    agent = createAgentServer({ db, service, webhookSecret: SECRET, publicApi: new PublicApi(db, cfg), publicOrigins: ['https://grainlify.com'], onError: (e) => console.error(e) });
     agentUrl = await listen(agent);
 
     gh.addUser('maintainer', 1, '2015-01-01T00:00:00Z');
@@ -266,5 +265,41 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     const t = await new PgSpendLedger(db, budgetConfig()).totals();
     expect(t.lifetimeMicro).toBe(inferenceJournal.committedMicro());
     expect(t.byPhase.P2P3).toBe(t.lifetimeMicro);
+  });
+
+  it('publishes the paid bounty, its receipts and an honest status on the public API', async () => {
+    const r = await fetch(`${agentUrl}/public/ledger`, { headers: { origin: 'https://grainlify.com' } });
+    expect(r.status).toBe(200);
+    expect(r.headers.get('access-control-allow-origin')).toBe('https://grainlify.com');
+    const body = (await r.json()) as { status: { mainnetLive: boolean; statusLine: string }; totals: { bountiesPaidTest: number; bountiesPaidMainnet: number; inferenceSpendMicro: number | null }; events: { kind: string; test: boolean; amount: string | null }[] };
+    expect(body.status.mainnetLive).toBe(false);
+    expect(body.status.statusLine).toMatch(/Devnet test run so far/);
+    expect(body.totals.bountiesPaidTest).toBeGreaterThanOrEqual(1);
+    expect(body.totals.bountiesPaidMainnet).toBe(0);
+    // Mock inference is never reported as spend.
+    expect(body.totals.inferenceSpendMicro).toBeNull();
+    const kinds = new Set(body.events.map((e) => e.kind));
+    for (const k of ['bounty_posted', 'inference', 'gate_passed', 'gate_refused', 'payout']) expect(kinds.has(k)).toBe(true);
+    expect(body.events.every((e) => e.test)).toBe(true);
+    expect(body.events.filter((e) => e.kind === 'inference').every((e) => e.amount === null)).toBe(true);
+    const payout = body.events.find((e) => e.kind === 'payout')!;
+    expect(payout.amount).toBe('20.00 test USDC');
+  });
+
+  it('serves one bounty for the wallet-link page, and 404s an unknown one', async () => {
+    const list = (await (await fetch(`${agentUrl}/public/bounties`)).json()) as { bounties: { id: string; issueTitle: string }[] };
+    const one = list.bounties.find((b) => b.issueTitle === 'Typo in README')!;
+    const r = await fetch(`${agentUrl}/public/bounties/${one.id}`);
+    expect(((await r.json()) as { bounty: { issueUrl: string } }).bounty.issueUrl).toBe(`https://github.com/${REPO}/issues/1`);
+    expect((await fetch(`${agentUrl}/public/bounties/00000000-0000-4000-8000-000000000000`)).status).toBe(404);
+  });
+
+  it('gives CORS only to allowed origins, and refuses writes', async () => {
+    const evil = await fetch(`${agentUrl}/public/status`, { headers: { origin: 'https://evil.example' } });
+    expect(evil.headers.get('access-control-allow-origin')).toBeNull();
+    const pre = await fetch(`${agentUrl}/public/status`, { method: 'OPTIONS', headers: { origin: 'https://grainlify.com' } });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get('access-control-allow-methods')).toBe('GET, OPTIONS');
+    expect((await fetch(`${agentUrl}/public/ledger`, { method: 'POST', body: '{}' })).status).toBe(405);
   });
 });

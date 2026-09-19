@@ -58,7 +58,7 @@ export function p2Config(over: Partial<AgentConfig> & Pick<AgentConfig, 'mints' 
     },
     inferencePhase: 'P2P3',
     inferenceMode: 'mock',
-    linkPageUrl: 'https://grainlify.github.io/grainlify-bounty-agent/link/',
+    linkPageUrl: 'https://grainlify.com/bounties/link',
     maxDiffChars: 20_000,
     ...over,
   };
