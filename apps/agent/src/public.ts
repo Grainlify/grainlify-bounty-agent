@@ -22,10 +22,12 @@ export function publicOrigins(env: { PUBLIC_ALLOWED_ORIGINS?: string }): string[
 }
 
 /** CORS headers for an allowed origin; none at all for any other, so browsers block it. */
-export function corsHeaders(origin: string | undefined, allowed: string[]): Record<string, string> {
+export function corsHeaders(origin: string | undefined, allowed: string[], methods = 'GET, OPTIONS'): Record<string, string> {
   const base = { vary: 'Origin' };
   if (!origin || !allowed.includes(origin)) return base;
-  return { ...base, 'access-control-allow-origin': origin, 'access-control-allow-methods': 'GET, OPTIONS', 'access-control-max-age': '600' };
+  const h: Record<string, string> = { ...base, 'access-control-allow-origin': origin, 'access-control-allow-methods': methods, 'access-control-max-age': '600' };
+  if (methods.includes('POST')) h['access-control-allow-headers'] = 'content-type';
+  return h;
 }
 
 export interface PublicStatus {

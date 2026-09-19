@@ -60,6 +60,9 @@ export async function wire() {
     inferenceMode: live ? 'live' : 'mock',
     ...(env.LINK_PAGE_URL ? { linkPageUrl: env.LINK_PAGE_URL } : {}),
   });
-  const service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(need('PAYOUT_SIGNER_URL'), need('PAYOUT_SIGNER_TOKEN')), cfg });
+  // Public key only (base64): Grainlify-Backend holds the private half. Unset leaves /link/session answering 503.
+  const linkCountersignKey = env.BOUNTY_LINK_COUNTERSIGN_PUBKEY?.trim() || undefined;
+  if (linkCountersignKey && Buffer.from(linkCountersignKey, 'base64').length !== 32) throw new Error('BOUNTY_LINK_COUNTERSIGN_PUBKEY must be base64 of a 32-byte ed25519 public key');
+  const service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(need('PAYOUT_SIGNER_URL'), need('PAYOUT_SIGNER_TOKEN')), cfg, linkCountersignKey });
   return { db, gh, service, cfg, webhookSecret: app.webhook_secret, publicApi: new PublicApi(db, cfg), publicOrigins: publicOrigins(env) };
 }

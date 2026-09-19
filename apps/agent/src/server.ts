@@ -78,6 +78,32 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         return pub(404, { error: 'not found' });
       }
 
+      // Wallet link from a signed-in Grainlify session. Browser-facing, so the
+      // same origin allowlist as /public/*; what authorises it is the two
+      // signatures in the body, not the origin.
+      if (url.pathname === '/link/session') {
+        const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
+        const reply = (status: number, body: unknown) => {
+          res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors });
+          res.end(JSON.stringify(body));
+        };
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, cors);
+          return res.end();
+        }
+        if (req.method !== 'POST') return reply(405, { error: 'method_not_allowed' });
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8')) as Record<string, unknown>;
+        } catch {
+          return reply(400, { error: 'malformed', detail: 'the body must be JSON under 16 KB' });
+        }
+        const r = await d.service.linkWalletFromSession({ message: body?.message, countersignature: body?.countersignature, walletSignature: body?.walletSignature });
+        return r.ok
+          ? reply(r.status, { linked: true, wallet: r.wallet, githubLogin: r.githubLogin, replaced: r.replaced, unchanged: r.unchanged })
+          : reply(r.status, { error: r.error, detail: r.detail });
+      }
+
       if (req.method === 'POST' && url.pathname === '/github/webhook') {
         const raw = await readRaw(req, 5 * 1024 * 1024);
         if (!verifyWebhookSignature(d.webhookSecret, raw, req.headers['x-hub-signature-256'] as string | undefined)) return send(401, { error: 'bad signature' });

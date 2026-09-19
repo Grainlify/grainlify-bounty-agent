@@ -11,6 +11,7 @@ import type pg from 'pg';
 import { verifyApproval, type Approval, type PayoutTerms } from '../../../packages/gate/src/approval.ts';
 import { evaluateGate, type GateFacts, type GateResult } from '../../../packages/gate/src/gate.ts';
 import { parseAndVerifyLinkComment } from '../../../packages/gate/src/link.ts';
+import { verifySessionLink, type SessionLinkRefusal } from '../../../packages/gate/src/session-link.ts';
 import type { X402Client } from '../../../packages/x402/src/client.ts';
 import type { InferenceCallRecord } from '../../../packages/x402/src/receipts.ts';
 import { X402_PATHS } from '../../../packages/x402/src/protocol.ts';
@@ -28,8 +29,14 @@ export interface Deps {
   x402: X402Client;
   payoutSigner: PayoutSignerApi;
   cfg: AgentConfig;
+  /** Base64 of Grainlify's countersigning public key; without it session links are off. */
+  linkCountersignKey?: string;
   now?: () => Date;
 }
+
+export type SessionLinkOutcome =
+  | { ok: true; status: 201 | 200; wallet: string; githubLogin: string; replaced: string | null; unchanged: boolean }
+  | { ok: false; status: 400 | 409 | 503; error: SessionLinkRefusal | 'nonce_used' | 'wallet_linked_to_another_account' | 'session_links_off'; detail: string };
 
 const FOOTER = '\n\n<sub>Grainlify Agent · every reasoning step is inference bought on UsePod over x402 · payment depends only on a maintainer merge and a human approval.</sub>';
 
@@ -109,7 +116,7 @@ export class BountyService {
       `### Bounty: ${formatAmount(amount, mint.decimals, label)}`,
       testNote,
       `\n**How to claim**`,
-      `1. Link your Solana wallet once at ${this.d.cfg.linkPageUrl}?bounty=${bountyId} (works from a phone wallet) and post the \`/grainlify link …\` line it gives you as a comment here.`,
+      `1. Link your Solana wallet once at ${this.d.cfg.linkPageUrl}?bounty=${bountyId}: sign in to Grainlify with this GitHub account and sign one message in your wallet (a phone wallet works).`,
       `2. Open a pull request that says \`Closes #${issueNumber}\`.`,
       `3. When a maintainer merges it, the payout goes to a human for approval, then to your wallet.`,
       `\n**Rules:** one wallet per GitHub account; accounts must be at least ${this.d.cfg.gate.minAccountAgeDays} days old; self-merged PRs are not paid; one payout per bounty.`,
@@ -160,6 +167,65 @@ export class BountyService {
     }
     await this.audit(p.comment.user.login, 'wallet.linked', String(user.id), { wallet: parsed.wallet, source: p.comment.html_url });
     await this.d.gh.comment(fullName, p.issue.number, `${who} linked wallet \`${parsed.wallet}\`. Bounties you earn will be paid there.${FOOTER}`);
+  }
+
+  /**
+   * A link from a signed-in Grainlify session: Grainlify's countersignature
+   * names the GitHub account, the wallet's signature proves the wallet. The
+   * nonce is spent in the same transaction that stores the link, so a
+   * refused or replayed request changes nothing.
+   */
+  async linkWalletFromSession(input: { message: unknown; countersignature: unknown; walletSignature: unknown }): Promise<SessionLinkOutcome> {
+    if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
+    const v = verifySessionLink(input, this.d.linkCountersignKey, this.now());
+    if (!v.ok) return { ok: false, status: 400, error: v.code, detail: v.reason };
+    const f = v.fields;
+
+    const client = await this.d.db.connect();
+    let replaced: string | null = null;
+    let unchanged = false;
+    try {
+      await client.query('BEGIN');
+      const spent = await client.query(`INSERT INTO link_nonces (nonce, github_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING nonce`, [f.nonce, f.githubUserId]);
+      if (!spent.rowCount) {
+        await client.query('ROLLBACK');
+        return { ok: false, status: 409, error: 'nonce_used', detail: 'this link request was already used; start again to get a fresh one' };
+      }
+      // Account age is checked against the PR author at review time, not here.
+      await client.query(
+        `INSERT INTO contributors (github_user_id, login) VALUES ($1, $2) ON CONFLICT (github_user_id) DO UPDATE SET login = EXCLUDED.login`,
+        [f.githubUserId, f.login],
+      );
+      const taken = await client.query(`SELECT 1 FROM wallet_links WHERE address = $1 AND revoked_at IS NULL AND github_user_id <> $2`, [f.wallet, f.githubUserId]);
+      if (taken.rowCount) {
+        await client.query('ROLLBACK');
+        return { ok: false, status: 409, error: 'wallet_linked_to_another_account', detail: 'that wallet is already linked to another GitHub account' };
+      }
+      const current = await client.query<{ address: string }>(`SELECT address FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`, [f.githubUserId]);
+      if (current.rows[0]?.address === f.wallet) {
+        unchanged = true;
+      } else {
+        replaced = current.rows[0]?.address ?? null;
+        await client.query(`UPDATE wallet_links SET revoked_at = now() WHERE github_user_id = $1 AND revoked_at IS NULL`, [f.githubUserId]);
+        await client.query(`INSERT INTO wallet_links (github_user_id, address, message, signature, source) VALUES ($1, $2, $3, $4, $5)`, [
+          f.githubUserId,
+          f.wallet,
+          input.message,
+          input.walletSignature,
+          `grainlify-session:${f.nonce}`,
+        ]);
+      }
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      // Two requests for one wallet can pass the check together; the unique index stops the second.
+      if ((e as { code?: string }).code === '23505') return { ok: false, status: 409, error: 'wallet_linked_to_another_account', detail: 'that wallet was linked to another GitHub account moments ago' };
+      throw e;
+    } finally {
+      client.release();
+    }
+    if (!unchanged) await this.audit(f.login, 'wallet.linked', String(f.githubUserId), { wallet: f.wallet, source: 'grainlify-session', replaced });
+    return { ok: true, status: unchanged ? 200 : 201, wallet: f.wallet, githubLogin: f.login, replaced, unchanged };
   }
 
   // --- review --------------------------------------------------------------
