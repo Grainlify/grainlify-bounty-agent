@@ -283,6 +283,9 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     expect(body.events.every((e) => e.test)).toBe(true);
     expect(body.events.filter((e) => e.kind === 'inference').every((e) => e.amount === null)).toBe(true);
     const payout = body.events.find((e) => e.kind === 'payout')!;
+    // Every step of the paid bounty's chain carries its id: posted, priced, reviewed, gated, paid.
+    const chain = body.events.filter((e) => (e as { bountyId?: string }).bountyId === (payout as { bountyId?: string }).bountyId).map((e) => e.kind).sort();
+    expect(chain).toEqual(['bounty_posted', 'gate_passed', 'inference', 'inference', 'payout']);
     expect(payout.amount).toBe('20.00 test USDC');
   });
 

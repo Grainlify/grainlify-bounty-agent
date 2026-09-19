@@ -109,7 +109,7 @@ export class BountyService {
       `### Bounty: ${formatAmount(amount, mint.decimals, label)}`,
       testNote,
       `\n**How to claim**`,
-      `1. Link your Solana wallet once (instructions: ${this.d.cfg.linkPageUrl}) and post the \`/grainlify link …\` line as a comment here.`,
+      `1. Link your Solana wallet once at ${this.d.cfg.linkPageUrl}?bounty=${bountyId} (works from a phone wallet) and post the \`/grainlify link …\` line it gives you as a comment here.`,
       `2. Open a pull request that says \`Closes #${issueNumber}\`.`,
       `3. When a maintainer merges it, the payout goes to a human for approval, then to your wallet.`,
       `\n**Rules:** one wallet per GitHub account; accounts must be at least ${this.d.cfg.gate.minAccountAgeDays} days old; self-merged PRs are not paid; one payout per bounty.`,

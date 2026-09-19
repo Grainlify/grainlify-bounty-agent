@@ -53,6 +53,8 @@ export interface PublicBounty {
 export interface LedgerEvent {
   at: string;
   kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout';
+  /** The bounty this event belongs to, so a page can show one bounty's receipt chain. */
+  bountyId: string | null;
   test: boolean;
   detail: string;
   amount: string | null;
@@ -122,9 +124,9 @@ export class PublicApi {
     const events: LedgerEvent[] = [];
     for (const b of bounties) {
       const test = b.network !== 'solana-mainnet';
-      events.push({ at: b.postedAt, kind: 'bounty_posted', test, detail: `${b.repo} #${b.issueNumber}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: `issue #${b.issueNumber}`, url: b.issueUrl } });
+      events.push({ at: b.postedAt, kind: 'bounty_posted', bountyId: b.id, test, detail: `${b.repo} #${b.issueNumber}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: `issue #${b.issueNumber}`, url: b.issueUrl } });
       if (b.payout) {
-        events.push({ at: b.payout.paidAt, kind: 'payout', test, detail: `${b.repo} #${b.issueNumber} → ${b.payout.recipientLogin}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: shortSig(b.payout.txSignature), url: b.payout.txUrl } });
+        events.push({ at: b.payout.paidAt, kind: 'payout', bountyId: b.id, test, detail: `${b.repo} #${b.issueNumber} → ${b.payout.recipientLogin}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: shortSig(b.payout.txSignature), url: b.payout.txUrl } });
       }
     }
 
@@ -133,17 +135,18 @@ export class PublicApi {
       const b = byId.get(g.bounty_id);
       if (!b) continue;
       const checks = g.status === 'refused' ? 'gate_refused' : 'gate_passed';
-      events.push({ at: new Date(g.created_at).toISOString(), kind: checks, test: b.network !== 'solana-mainnet', detail: `${b.repo} PR #${g.pr_number}`, amount: null, proof: { label: `PR #${g.pr_number}`, url: `https://github.com/${b.repo}/pull/${g.pr_number}` } });
+      events.push({ at: new Date(g.created_at).toISOString(), kind: checks, bountyId: b.id, test: b.network !== 'solana-mainnet', detail: `${b.repo} PR #${g.pr_number}`, amount: null, proof: { label: `PR #${g.pr_number}`, url: `https://github.com/${b.repo}/pull/${g.pr_number}` } });
     }
 
     const calls = await this.db.query(
-      `SELECT purpose, model, quote_id, pay_tx_signature, paid_micro, fee_micro, created_at FROM inference_calls WHERE status = 'served' ORDER BY created_at DESC LIMIT 200`,
+      `SELECT purpose, model, quote_id, pay_tx_signature, paid_micro, fee_micro, created_at, links->>'bountyId' AS bounty_id FROM inference_calls WHERE status = 'served' ORDER BY created_at DESC LIMIT 200`,
     );
     for (const c of calls.rows) {
       const paid = Number(c.paid_micro ?? 0) + Number(c.fee_micro ?? 0);
       events.push({
         at: new Date(c.created_at).toISOString(),
         kind: 'inference',
+        bountyId: c.bounty_id ?? null,
         test: mock,
         detail: `${c.purpose} · ${c.model}`,
         amount: mock ? null : `$${(paid / 1e6).toFixed(6)}`,
