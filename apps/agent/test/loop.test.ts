@@ -41,6 +41,7 @@ const REPO = 'Grainlify/grainlify-agent-sandbox';
 const MINT = 'TestUsdcMint11111111111111111111111111111111';
 const SECRET = 'webhook-secret-for-tests';
 const TOKEN = 'test-token-0123456789abcdefghij';
+const PAYOUTS_TOKEN = 'payouts-token-0123456789abcdefghijkl';
 
 class RecordingRail implements PayoutRail {
   sent: { to: string; amountMinor: bigint; mint: string }[] = [];
@@ -113,7 +114,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     });
     const cfg = p2Config({ mints: { USDC: { mint: MINT, decimals: 6 } }, trustedApprovers: [approver.publicKey.toBase58()] });
     service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(payoutUrl, TOKEN), cfg });
-    agent = createAgentServer({ db, service, webhookSecret: SECRET, publicApi: new PublicApi(db, cfg), publicOrigins: ['https://grainlify.com'], onError: (e) => console.error(e) });
+    agent = createAgentServer({ db, service, payoutsApiToken: PAYOUTS_TOKEN, webhookSecret: SECRET, publicApi: new PublicApi(db, cfg), publicOrigins: ['https://grainlify.com'], onError: (e) => console.error(e) });
     agentUrl = await listen(agent);
 
     gh.addUser('maintainer', 1, '2015-01-01T00:00:00Z');
@@ -173,7 +174,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     expect(rail.sent).toHaveLength(0);
 
     // 5. The approver signs; the payout signer re-checks and pays.
-    const view = (await (await fetch(`${agentUrl}/api/payouts/${payout.id}`)).json()) as { terms: Parameters<typeof signApproval>[0] };
+    const view = (await (await fetch(`${agentUrl}/api/payouts/${payout.id}`, { headers: { authorization: `Bearer ${PAYOUTS_TOKEN}` } })).json()) as { terms: Parameters<typeof signApproval>[0] };
     const approval = signApproval(view.terms, approver.secretKey, approver.publicKey.toBase58(), new Date());
     const res = await fetch(`${agentUrl}/api/payouts/${payout.id}/approve`, { method: 'POST', body: JSON.stringify({ approval }) });
     expect(res.status).toBe(200);
@@ -248,7 +249,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     merge(105);
     await webhook('pull_request', { action: 'closed', repository: { full_name: REPO }, pull_request: { number: 105 } });
     const payout = (await db.query(`SELECT id FROM payouts WHERE bounty_id = $1`, [b.bountyId])).rows[0];
-    const view = (await (await fetch(`${agentUrl}/api/payouts/${payout.id}`)).json()) as { terms: Parameters<typeof signApproval>[0] };
+    const view = (await (await fetch(`${agentUrl}/api/payouts/${payout.id}`, { headers: { authorization: `Bearer ${PAYOUTS_TOKEN}` } })).json()) as { terms: Parameters<typeof signApproval>[0] };
     const sentBefore = rail.sent.length;
 
     const attacker = Keypair.generate();

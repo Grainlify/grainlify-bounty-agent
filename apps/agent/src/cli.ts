@@ -23,7 +23,9 @@ async function approve(payoutId: string) {
   const keyPath = process.env.APPROVER_KEYPAIR ?? join(homedir(), '.config', 'grainlify-bounty-agent', 'approver.keypair.json');
   const secret = Uint8Array.from(JSON.parse(readFileSync(keyPath, 'utf8')) as number[]);
 
-  const r = await fetch(`${agent}/api/payouts/${payoutId}`);
+  const token = process.env.PAYOUTS_API_TOKEN?.trim();
+  if (!token) throw new Error('PAYOUTS_API_TOKEN is required to read a payout (the same value the agent has)');
+  const r = await fetch(`${agent}/api/payouts/${payoutId}`, { headers: { authorization: `Bearer ${token}` } });
   if (!r.ok) throw new Error(`agent: ${r.status} ${await r.text()}`);
   const v = (await r.json()) as { terms: PayoutTerms; status: string; gate: GateResult };
   const t = v.terms;

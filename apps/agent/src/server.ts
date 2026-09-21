@@ -22,7 +22,25 @@ export interface ServerDeps {
   publicApi?: PublicApi;
   /** Browser origins allowed to read /public/*. */
   publicOrigins?: string[];
+  /**
+   * Bearer token for the payouts API (PAYOUTS_API_TOKEN).
+   *
+   * Reading a payout tells you the recipient's wallet address and the whole
+   * gate result, for a bounty that has not been paid yet. That was readable by
+   * anyone who knew the id, and payout ids travel in approval requests and
+   * logs. Unset means the read is refused (503), never opened: a service that
+   * boots without its token must not serve the data it is missing the key for.
+   */
+  payoutsApiToken?: string;
   onError?: (e: unknown) => void;
+}
+
+/** Constant-time bearer check, so a wrong token cannot be found a byte at a time. */
+function bearerOk(header: string | undefined, expected: string): boolean {
+  if (!header?.startsWith('Bearer ')) return false;
+  const got = Buffer.from(header.slice(7));
+  const want = Buffer.from(expected);
+  return got.length === want.length && timingSafeEqual(got, want);
 }
 
 export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise<void> } {
@@ -123,6 +141,10 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       const m = /^\/api\/payouts\/([0-9a-f-]{36})(\/approve)?$/.exec(url.pathname);
       if (m) {
         if (req.method === 'GET' && !m[2]) {
+          // Authorised before the payout is looked up, so a refusal cannot be
+          // used to tell an existing payout id from a made-up one.
+          if (!d.payoutsApiToken) return send(503, { error: 'payouts_api_token_not_configured' });
+          if (!bearerOk(req.headers.authorization, d.payoutsApiToken)) return send(401, { error: 'unauthorized' });
           const v = await d.service.payoutTerms(m[1]!);
           return v ? send(200, v) : send(404, { error: 'not found' });
         }

@@ -64,5 +64,9 @@ export async function wire() {
   const linkCountersignKey = env.BOUNTY_LINK_COUNTERSIGN_PUBKEY?.trim() || undefined;
   if (linkCountersignKey && Buffer.from(linkCountersignKey, 'base64').length !== 32) throw new Error('BOUNTY_LINK_COUNTERSIGN_PUBKEY must be base64 of a 32-byte ed25519 public key');
   const service = new BountyService({ db, gh, x402, payoutSigner: new PayoutSignerClient(need('PAYOUT_SIGNER_URL'), need('PAYOUT_SIGNER_TOKEN')), cfg, linkCountersignKey });
-  return { db, gh, service, cfg, webhookSecret: app.webhook_secret, publicApi: new PublicApi(db, cfg), publicOrigins: publicOrigins(env) };
+  // Long enough that guessing is not a strategy; short tokens have a way of
+  // becoming "temporary" and permanent.
+  const payoutsApiToken = env.PAYOUTS_API_TOKEN?.trim() || undefined;
+  if (payoutsApiToken && payoutsApiToken.length < 32) throw new Error('PAYOUTS_API_TOKEN must be at least 32 characters');
+  return { db, gh, service, cfg, webhookSecret: app.webhook_secret, publicApi: new PublicApi(db, cfg), publicOrigins: publicOrigins(env), payoutsApiToken };
 }
