@@ -35,7 +35,7 @@ export interface Deps {
 }
 
 export type SessionLinkOutcome =
-  | { ok: true; status: 201 | 200; wallet: string; githubLogin: string; replaced: string | null; unchanged: boolean }
+  | { ok: true; status: 201 | 200; wallet: string; githubLogin: string; githubUserId: number; replaced: string | null; unchanged: boolean }
   | { ok: false; status: 400 | 409 | 503; error: SessionLinkRefusal | 'nonce_used' | 'wallet_linked_to_another_account' | 'session_links_off'; detail: string };
 
 const FOOTER = '\n\n<sub>Grainlify Agent · every reasoning step is inference bought on UsePod over x402 · payment depends only on a maintainer merge and a human approval.</sub>';
@@ -225,7 +225,7 @@ export class BountyService {
       client.release();
     }
     if (!unchanged) await this.audit(f.login, 'wallet.linked', String(f.githubUserId), { wallet: f.wallet, source: 'grainlify-session', replaced });
-    return { ok: true, status: unchanged ? 200 : 201, wallet: f.wallet, githubLogin: f.login, replaced, unchanged };
+    return { ok: true, status: unchanged ? 200 : 201, wallet: f.wallet, githubLogin: f.login, githubUserId: f.githubUserId, replaced, unchanged };
   }
 
   // --- review --------------------------------------------------------------

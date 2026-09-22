@@ -32,6 +32,21 @@ export interface ServerDeps {
    * boots without its token must not serve the data it is missing the key for.
    */
   payoutsApiToken?: string;
+  /**
+   * One line per request. Default console.log; tests pass their own.
+   *
+   * It exists because when a link did not appear, the logs held only the boot
+   * line: there was no way to tell a request that never arrived from one that
+   * arrived and was refused. It carries the method, the path, the status, how
+   * long it took, and - for a link attempt - the outcome and the GitHub id the
+   * countersignature named.
+   *
+   * It never carries a secret: no Authorization header, no bearer token, no
+   * wallet or Grainlify signature, no countersignature, and not the signed
+   * message. The wallet address stays out too; the database holds the link,
+   * and a log is a worse place for it than a table with access control.
+   */
+  log?: (line: string) => void;
   onError?: (e: unknown) => void;
 }
 
@@ -65,6 +80,14 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
   }
 
   const server = createServer(async (req, res) => {
+    const log = d.log ?? ((line: string) => console.log(line));
+    const startedAt = Date.now();
+    // Only the path: a query string is caller-controlled and would put
+    // whatever somebody sent us into the log.
+    const path = (req.url ?? '/').split('?')[0];
+    let note = '';
+    res.on('finish', () => log(`${req.method} ${path} ${res.statusCode} ${Date.now() - startedAt}ms${note}`));
+
     const send = (status: number, body: unknown, type = 'application/json') => {
       res.writeHead(status, { 'content-type': type });
       res.end(typeof body === 'string' ? body : JSON.stringify(body));
@@ -117,6 +140,11 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           return reply(400, { error: 'malformed', detail: 'the body must be JSON under 16 KB' });
         }
         const r = await d.service.linkWalletFromSession({ message: body?.message, countersignature: body?.countersignature, walletSignature: body?.walletSignature });
+        // Enough to answer "did this attempt reach us, whose was it, and what
+        // did we decide" without putting the signed material in a log file.
+        note = r.ok
+          ? ` link=${r.unchanged ? 'unchanged' : r.replaced ? 'replaced' : 'linked'} github=${r.githubUserId}`
+          : ` link=refused reason=${r.error}`;
         return r.ok
           ? reply(r.status, { linked: true, wallet: r.wallet, githubLogin: r.githubLogin, replaced: r.replaced, unchanged: r.unchanged })
           : reply(r.status, { error: r.error, detail: r.detail });
