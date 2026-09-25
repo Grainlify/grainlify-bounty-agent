@@ -1,101 +1,174 @@
-# Grainlify bounty agent
+// Read-only public API for grainlify.com: the Bounties program page, the
+// ledger and the wallet-link page. Everything here is already public on
+// GitHub or on-chain; nothing here can change state.
+//
+// Honesty rules:
+//  - `status` says which network payouts run on and whether inference is
+//    mocked, straight from the running configuration, so the pages change the
+//    moment mainnet is switched on and cannot claim more than is true.
+//  - While inference is mocked, no dollar figure is reported for it: the mock
+//    ledger records play money, and showing it would overstate real spend.
 
-Grainlify's bounty agent funds open-source work. Creator fees from the project's token (GRAIN, launched on ClawPump) flow into a treasury. The agent picks GitHub issues worth funding, prices them, posts bounties, and reviews the pull requests. When a maintainer merges, the contributor is paid on Solana.
+import type pg from 'pg';
+import { computeMetrics } from '../../../packages/budget/src/metrics.ts';
+import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
+import { explorerTx, type AgentConfig } from './config.ts';
 
-Every reasoning step the agent takes is inference bought from [UsePod](https://usepod.ai), paid per request over **x402** from the agent's own wallet. Each call leaves a receipt linked to the bounty it served.
+export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
 
-This is an entry for the AnsemHack Clawrena (Inference Markets and ClawPump × pump.fun tracks).
+export function publicOrigins(env: { PUBLIC_ALLOWED_ORIGINS?: string }): string[] {
+  const list = env.PUBLIC_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean);
+  return list?.length ? list : DEFAULT_PUBLIC_ORIGINS;
+}
 
-## Status
+/** CORS headers for an allowed origin; none at all for any other, so browsers block it. */
+export function corsHeaders(origin: string | undefined, allowed: string[], methods = 'GET, OPTIONS'): Record<string, string> {
+  const base = { vary: 'Origin' };
+  if (!origin || !allowed.includes(origin)) return base;
+  const h: Record<string, string> = { ...base, 'access-control-allow-origin': origin, 'access-control-allow-methods': methods, 'access-control-max-age': '600' };
+  if (methods.includes('POST')) h['access-control-allow-headers'] = 'content-type';
+  return h;
+}
 
-| Piece | State |
-|---|---|
-| UsePod x402 client (`packages/x402`) | Built and tested against the mock. Supports on-chain payment and surplus-credit drawdown. |
-| Local x402 mock gateway (`packages/mock-gateway`) | Built from recorded live 402 captures and probed error strings. |
-| Inference budget governor (`packages/budget`) | $5.00 lifetime ceiling, per-phase allocations, and atomic reservations. |
-| Signer service (`services/signer`) | Separate process with its own spend journal and ceiling. It can only pay allowlisted UsePod quotes. |
-| Receipts and spend ledger (`packages/db`) | Postgres. |
-| Payout gate (`packages/gate`) | A deterministic function with 13 checks that fails closed. No model output is an input. |
-| Wallet linking | A signed `/grainlify link …` comment. GitHub proves the account and the signature proves the wallet. |
-| Human approval | Ed25519-signed by an approver key that never reaches the agent. It commits to recipient, amount, mint, network and bounty. |
-| Payout signer (`services/signer/src/payout`) | Separate key and journal. Pays only with a valid approval, and re-checks the merge on GitHub, its own repo allowlist, the $50/bounty and $150/day hard caps, and "paid once". |
-| Agent (`apps/agent`) | GitHub App webhooks (HMAC checked, delivery-deduped), bounty pricing and PR review over x402, gate on merge, approve CLI. |
+export interface PublicStatus {
+  network: string;
+  mainnetLive: boolean;
+  inferenceMode: 'mock' | 'live';
+  statusLine: string;
+}
 
-## Money safety
+export interface PublicBounty {
+  id: string;
+  repo: string;
+  issueNumber: number;
+  issueTitle: string | null;
+  issueUrl: string;
+  amountMinor: string;
+  decimals: number;
+  currency: string;
+  network: string;
+  status: string;
+  postedAt: string;
+  payout: { txSignature: string; txUrl: string; paidAt: string; recipientLogin: string } | null;
+}
 
-- **Model output never authorizes a payment.**
-  - Payouts will be gated by deterministic checks (P2): allowlisted repo, merged by a maintainer who is not the author, a linked wallet, and caps.
-  - During the hackathon every payout also needs manual approval.
-- **Keys never enter the agent.**
-  - Only the signer process reads a keypair file, and that file lives outside this repo.
-  - The signer has no general "transfer" endpoint. It pays a UsePod quote only when:
-    - the destination is on the allowlist;
-    - the network is Solana mainnet and the asset is USDC;
-    - the amount is under a per-call maximum.
-- **Inference spend is capped at $5.00 for the lifetime of the project,** including Solana network fees and any deposit.
-  - The agent's governor reserves budget before every payment.
-  - The signer keeps its own journal and refuses independently once the ceiling is reached.
-  - Neither ceiling can be raised by configuration; it can only be lowered.
-- **Issue, PR and comment text is untrusted input.**
-- No secrets live in this repo. `.gitignore` covers keyfiles and env files, and GitHub secret scanning with push protection is on.
+export interface LedgerEvent {
+  at: string;
+  kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout';
+  bountyId: string | null;
+  test: boolean;
+  detail: string;
+  amount: string | null;
+  proof: { label: string; url: string | null };
+}
 
-## x402 on UsePod: what we learned
+export interface LedgerResponse {
+  events: LedgerEvent[];
+  metrics: {
+    inferenceTotal: number | null;
+    networkFeeTotal: number | null;
+    costPerServedCall: number | null;
+    costPerMergedPr: number | null;
+    callCountOnChain: number;
+    callCountSurplus: number;
+  };
+}
 
-These findings come from live probes; the full catalogue is in [fixtures/usepod/x402-errors.json](fixtures/usepod/x402-errors.json).
+const shortSig = (s: string) => `${s.slice(0, 5)}…${s.slice(-4)}`;
 
-**The flow.** An unpaid request returns `402` with a base64 JSON quote in `PAYMENT-REQUIRED`. The quote is bound to `sha256("POST\n<path>\n<body>")`. You pay USDC to `pay_to` on Solana, then retry the byte-identical request with `PAYMENT-SIGNATURE`.
+export class PublicApi {
+  constructor(private readonly db: pg.Pool, private readonly cfg: AgentConfig) {}
 
-**Surplus credit.** The quote is a cap. The unused part is credited to the payer wallet, and a later call can spend that credit with no on-chain transaction:
+  status(): PublicStatus {
+    const mainnetLive = this.cfg.network === 'solana-mainnet';
+    const statusLine = mainnetLive
+      ? this.cfg.inferenceMode === 'live'
+        ? 'Live on Solana mainnet. Bounties pay real USDC; inference is paid per request on UsePod.'
+        : 'Payouts are live on Solana mainnet; inference is still running against a test gateway.'
+      : 'Devnet test run so far. Bounties pay test tokens with no value; mainnet bounties are not live yet.';
+    return { network: this.cfg.network, mainnetLive, inferenceMode: this.cfg.inferenceMode, statusLine };
+  }
 
-```json
-{ "quote_id": "…", "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "asset": "USDC",
-  "payer_wallet": "<pubkey>", "scheme": "balance",
-  "proof": "<ed25519 signature of 'usepod-x402-spend:<quote_id>'>" }
-```
+  private decimalsFor(mint: string) {
+    return Object.values(this.cfg.mints).find((m) => m.mint === mint)?.decimals ?? 6;
+  }
 
-The gateway's own error message says `payload.proof`, but it reads the **top-level** `proof` field.
+  async bounties(id?: string): Promise<PublicBounty[]> {
+    const r = await this.db.query(
+      `SELECT b.id, r.owner, r.name, b.issue_number, b.issue_title, b.amount_minor::text AS amount_minor, b.mint, b.currency, b.network, b.status, b.created_at,
+              p.tx_signature, p.updated_at AS paid_at, s.author_login
+         FROM bounties b
+         JOIN repos r ON r.id = b.repo_id
+         LEFT JOIN payouts p ON p.bounty_id = b.id AND p.status = 'confirmed'
+         LEFT JOIN submissions s ON s.id = p.submission_id
+        WHERE b.status IN ('posted','in_review','payable','paid') ${id ? 'AND b.id = $1' : ''}
+        ORDER BY b.created_at DESC
+        LIMIT 200`,
+      id ? [id] : [],
+    );
+    return r.rows.map((b) => ({
+      id: b.id,
+      repo: `${b.owner}/${b.name}`,
+      issueNumber: b.issue_number,
+      issueTitle: b.issue_title,
+      issueUrl: `https://github.com/${b.owner}/${b.name}/issues/${b.issue_number}`,
+      amountMinor: b.amount_minor,
+      decimals: this.decimalsFor(b.mint),
+      currency: b.currency,
+      network: b.network,
+      status: b.status,
+      postedAt: new Date(b.created_at).toISOString(),
+      payout: b.tx_signature
+        ? { txSignature: b.tx_signature, txUrl: explorerTx(b.network, b.tx_signature), paidAt: new Date(b.paid_at).toISOString(), recipientLogin: b.author_login }
+        : null,
+    }));
+  }
 
-**Constraints:**
-- `max_tokens` is required.
-- Streaming is rejected.
-- Mainnet only; there is no devnet.
+  async ledger(): Promise<LedgerResponse> {
+    const status = this.status();
+    const mock = status.inferenceMode === 'mock';
+    const bounties = await this.bounties();
+    const byId = new Map(bounties.map((b) => [b.id, b]));
+    const fmt = (minor: string, decimals: number, currency: string, network: string) => {
+      const n = Number(minor) / 10 ** decimals;
+      return `${n.toFixed(2)} ${network === 'solana-mainnet' ? currency : `test ${currency}`}`;
+    };
 
-## Development
+    const events: LedgerEvent[] = [];
+    for (const b of bounties) {
+      const test = b.network !== 'solana-mainnet';
+      events.push({ at: b.postedAt, kind: 'bounty_posted', bountyId: b.id, test, detail: `${b.repo} #${b.issueNumber}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: `issue #${b.issueNumber}`, url: b.issueUrl } });
+      if (b.payout) {
+        events.push({ at: b.payout.paidAt, kind: 'payout', bountyId: b.id, test, detail: `${b.repo} #${b.issueNumber} → ${b.payout.recipientLogin}`, amount: fmt(b.amountMinor, b.decimals, b.currency, b.network), proof: { label: shortSig(b.payout.txSignature), url: b.payout.txUrl } });
+      }
+    }
 
-```bash
-pnpm install
-docker compose up -d postgres
-TEST_DATABASE_URL=postgres://agent:agent-local-only@127.0.0.1:55432/agent pnpm test
-pnpm typecheck
+    const gates = await this.db.query(`SELECT p.bounty_id, p.status, p.created_at, s.pr_number FROM payouts p JOIN submissions s ON s.id = p.submission_id ORDER BY p.created_at DESC LIMIT 200`);
+    for (const g of gates.rows) {
+      const b = byId.get(g.bounty_id);
+      if (!b) continue;
+      const checks = g.status === 'refused' ? 'gate_refused' : 'gate_passed';
+      events.push({ at: new Date(g.created_at).toISOString(), kind: checks, bountyId: b.id, test: b.network !== 'solana-mainnet', detail: `${b.repo} PR #${g.pr_number}`, amount: null, proof: { label: `PR #${g.pr_number}`, url: `https://github.com/${b.repo}/pull/${g.pr_number}` } });
+    }
 
-# Run everything locally at $0:
-pnpm mock                                   # mock UsePod gateway on :8402
-SIGNER_RAIL=mock SIGNER_TOKEN=… pnpm signer # signer on :8787
-DATABASE_URL=… SIGNER_TOKEN=… pnpm spike baseline overpay routing
-DATABASE_URL=… pnpm ledger                  # spend vs allocation
-```
+    const calls = await this.db.query(`SELECT purpose, model, quote_id, pay_tx_signature, paid_micro, fee_micro, created_at, links->>'bountyId' AS bounty_id FROM inference_calls WHERE status = 'served' ORDER BY created_at DESC LIMIT 200`);
+    for (const c of calls.rows) {
+      events.push({ at: new Date(c.created_at).toISOString(), kind: 'inference', bountyId: c.bounty_id, test: mock, detail: `${c.model} (${c.purpose})`, amount: mock ? null : `${(Number(c.paid_micro) / 1e6).toFixed(6)} USDC`, proof: { label: shortSig(c.pay_tx_signature), url: explorerTx('solana-mainnet', c.pay_tx_signature) } });
+    }
 
-`pnpm spike` refuses to call the real gateway unless `SPIKE_CONFIRM=spend-real-money` is set.
+    const dbLedger = new PgSpendLedger(this.db);
+    const metrics = await computeMetrics(dbLedger);
 
-## Running the P2 loop on devnet
-
-P2 pays **devnet test USDC only**. That is a mint we created, with no value. All inference goes to the local mock gateway. Keys live in `~/.config/grainlify-bounty-agent/`, never in this repo.
-
-### Steps
-
-1. **Test token.** Create the test token and fund the payout float. The mint authority needs devnet SOL first.
-   ```
-   pnpm tsx scripts/test-usdc-setup.ts https://api.devnet.solana.com <mint-authority.json> <payout-float-pubkey>
-   ```
-2. **Processes.** Start them, each in its own shell:
-   - `pnpm mock`
-   - `SIGNER_RAIL=mock pnpm signer`
-   - `PAYOUT_NETWORK=solana-devnet … pnpm payout-signer`
-   - `pnpm agent`
-   - `npx smee-client --url <smee channel> --target http://127.0.0.1:3000/github/webhook`
-3. **Allowlist the sandbox repo.** `pnpm cli repo add Grainlify/grainlify-agent-sandbox`
-4. **Post a bounty.** `pnpm cli bounty propose Grainlify/grainlify-agent-sandbox <issue>`
-5. **Contributor steps.**
-   - Link a wallet with `pnpm tsx scripts/sign-link.ts <login> <keypair>` and post the output as a comment.
-   - Open a PR that says `Closes #<issue>`.
-6. **Merge and approve.** A maintainer merges, then `pnpm approve <payout-id>`.
+    return {
+      events,
+      metrics: {
+        inferenceTotal: mock ? null : metrics.inferenceTotal,
+        networkFeeTotal: mock ? null : metrics.networkFeeTotal,
+        costPerServedCall: mock ? null : metrics.costPerServedCall,
+        costPerMergedPr: mock ? null : metrics.costPerMergedPr,
+        callCountOnChain: metrics.callCountOnChain,
+        callCountSurplus: metrics.callCountSurplus,
+      },
+    };
+  }
+}
