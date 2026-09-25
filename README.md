@@ -1,101 +1,201 @@
-# Grainlify bounty agent
+// Pays for UsePod inference per request over x402 and leaves a receipt for
+// every call.
+//
+// Order of preference for paying:
+//   1. surplus credit ("balance" scheme): no on-chain transaction, no network fee;
+//   2. an on-chain USDC transfer, reserved against the budget first.
+// The client never holds a key: the Payer (the signer service) pays and signs.
 
-Grainlify's bounty agent funds open-source work. Creator fees from the project's token (GRAIN, launched on ClawPump) flow into a treasury. The agent picks GitHub issues worth funding, prices them, posts bounties, and reviews the pull requests. When a maintainer merges, the contributor is paid on Solana.
+import { createHash, randomUUID } from 'node:crypto';
+import { lamportsToMicroCeil, type Phase } from '../../budget/src/governor.ts';
+import type { SpendLedger } from '../../budget/src/ledger.ts';
+import {
+  balanceEnvelope,
+  decodeQuoteHeader,
+  encodeEnvelope,
+  isBalanceInsufficient,
+  isExpired,
+  isTxNotYetVisible,
+  onchainEnvelope,
+  parseGatewayError,
+  selectUsdcRail,
+  type GatewayError,
+  type SolanaUsdcRail,
+  type X402Path,
+} from './protocol.ts';
+import type { CallLinks, CallPurpose, InferenceCallRecord, ReceiptStore } from './receipts.ts';
 
-Every reasoning step the agent takes is inference bought from [UsePod](https://usepod.ai), paid per request over **x402** from the agent's own wallet. Each call leaves a receipt linked to the bounty it served.
+export interface Payer {
+  address(): Promise<string>;
+  payQuote(rail: SolanaUsdcRail & { amount_microunits: number }): Promise<PayOutcome>;
+  balanceProof(quoteId: string): Promise<{ payer_wallet: string; proof: string }>;
+}
 
-This is an entry for the AnsemHack Clawrena (Inference Markets and ClawPump × pump.fun tracks).
+export type PayOutcome =
+  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_micro: number; fee_lamports: number }
+  /** The signer refused before sending anything. Certain: no money moved. */
+  | { kind: 'refused'; error: string }
+  /** Something went wrong after the transaction may have been sent. Money may have moved. */
+  | { kind: 'unknown'; error: string };
 
-## Status
+export interface RoutingRequest {
+  mode?: 'auto' | 'marketplace-only' | 'centralized-only';
+  maxPriceInputPer1m?: number;
+  maxPriceOutputPer1m?: number;
+  providers?: string[];
+}
 
-| Piece | State |
-|---|---|
-| UsePod x402 client (`packages/x402`) | Built and tested against the mock. Supports on-chain payment and surplus-credit drawdown. |
-| Local x402 mock gateway (`packages/mock-gateway`) | Built from recorded live 402 captures and probed error strings. |
-| Inference budget governor (`packages/budget`) | $5.00 lifetime ceiling, per-phase allocations, and atomic reservations. |
-| Signer service (`services/signer`) | Separate process with its own spend journal and ceiling. It can only pay allowlisted UsePod quotes. |
-| Receipts and spend ledger (`packages/db`) | Postgres. |
-| Payout gate (`packages/gate`) | A deterministic function with 13 checks that fails closed. No model output is an input. |
-| Wallet linking | A signed `/grainlify link …` comment. GitHub proves the account and the signature proves the wallet. |
-| Human approval | Ed25519-signed by an approver key that never reaches the agent. It commits to recipient, amount, mint, network and bounty. |
-| Payout signer (`services/signer/src/payout`) | Separate key and journal. Pays only with a valid approval, and re-checks the merge on GitHub, its own repo allowlist, the $50/bounty and $150/day hard caps, and "paid once". |
-| Agent (`apps/agent`) | GitHub App webhooks (HMAC checked, delivery-deduped), bounty pricing and PR review over x402, gate on merge, approve CLI. |
+export interface CallRequest {
+  purpose: CallPurpose;
+  phase: Phase;
+  path: X402Path;
+  body: Record<string, unknown>;
+  routing?: RoutingRequest;
+  links?: CallLinks;
+}
 
-## Money safety
+export interface CallResult {
+  record: InferenceCallRecord;
+  /** Parsed JSON response from the model. */
+  response: unknown;
+}
 
-- **Model output never authorizes a payment.**
-  - Payouts will be gated by deterministic checks (P2): allowlisted repo, merged by a maintainer who is not the author, a linked wallet, and caps.
-  - During the hackathon every payout also needs manual approval.
-- **Keys never enter the agent.**
-  - Only the signer process reads a keypair file, and that file lives outside this repo.
-  - The signer has no general "transfer" endpoint. It pays a UsePod quote only when:
-    - the destination is on the allowlist;
-    - the network is Solana mainnet and the asset is USDC;
-    - the amount is under a per-call maximum.
-- **Inference spend is capped at $5.00 for the lifetime of the project,** including Solana network fees and any deposit.
-  - The agent's governor reserves budget before every payment.
-  - The signer keeps its own journal and refuses independently once the ceiling is reached.
-  - Neither ceiling can be raised by configuration; it can only be lowered.
-- **Issue, PR and comment text is untrusted input.**
-- No secrets live in this repo. `.gitignore` covers keyfiles and env files, and GitHub secret scanning with push protection is on.
+export interface X402ClientOptions {
+  baseUrl: string;
+  payer: Payer;
+  ledger: SpendLedger;
+  receipts: ReceiptStore;
+  /** Worst-case network fee we reserve per on-chain payment, in lamports. */
+  feeReserveLamports?: number;
+  solUsdCeilingPrice?: number;
+  /**
+   * Pay at least this much on-chain when a payment is needed, so later calls
+   * run on surplus credit without a network fee each. Only useful if the live
+   * gateway credits overpayment; 0 (off) until the spike confirms that.
+   */
+  prefundMicro?: number;
+  fetchImpl?: typeof fetch;
+  sleep?: (ms: number) => Promise<void>;
+  now?: () => Date;
+}
 
-## x402 on UsePod: what we learned
+export class BudgetRefused extends Error {
+  constructor(readonly code: string, message: string) {
+    super(message);
+    this.name = 'BudgetRefused';
+  }
+}
 
-These findings come from live probes; the full catalogue is in [fixtures/usepod/x402-errors.json](fixtures/usepod/x402-errors.json).
+export class X402CallFailed extends Error {
+  constructor(message: string, readonly record: InferenceCallRecord, readonly gatewayError?: GatewayError) {
+    super(message);
+    this.name = 'X402CallFailed';
+  }
+}
 
-**The flow.** An unpaid request returns `402` with a base64 JSON quote in `PAYMENT-REQUIRED`. The quote is bound to `sha256("POST\n<path>\n<body>")`. You pay USDC to `pay_to` on Solana, then retry the byte-identical request with `PAYMENT-SIGNATURE`.
+const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
-**Surplus credit.** The quote is a cap. The unused part is credited to the payer wallet, and a later call can spend that credit with no on-chain transaction:
+export function routingHeaders(r: RoutingRequest | undefined): Record<string, string> {
+  const h: Record<string, string> = {};
+  if (!r) return h;
+  if (r.mode) h['X-Pod-Routing-Mode'] = r.mode;
+  if (r.maxPriceInputPer1m !== undefined) h['X-Pod-Max-Price-Input'] = String(r.maxPriceInputPer1m);
+  if (r.maxPriceOutputPer1m !== undefined) h['X-Pod-Max-Price-Output'] = String(r.maxPriceOutputPer1m);
+  if (r.providers?.length) h['X-Pod-Providers'] = r.providers.join(',');
+  return h;
+}
 
-```json
-{ "quote_id": "…", "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", "asset": "USDC",
-  "payer_wallet": "<pubkey>", "scheme": "balance",
-  "proof": "<ed25519 signature of 'usepod-x402-spend:<quote_id>'>" }
-```
+export class X402Client {
+  private surplusEstimateMicro = 0;
+  private readonly f: typeof fetch;
+  private readonly sleep: (ms: number) => Promise<void>;
+  private readonly now: () => Date;
 
-The gateway's own error message says `payload.proof`, but it reads the **top-level** `proof` field.
+  constructor(private readonly o: X402ClientOptions) {
+    this.f = o.fetchImpl ?? fetch;
+    this.sleep = o.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+    this.now = o.now ?? (() => new Date());
+  }
 
-**Constraints:**
-- `max_tokens` is required.
-- Streaming is rejected.
-- Mainnet only; there is no devnet.
+  get surplusEstimate() {
+    return this.surplusEstimateMicro;
+  }
 
-## Development
+  async call(req: CallRequest): Promise<CallResult> {
+    const started = Date.now();
+    // Serialize once. The quote is bound to these exact bytes.
+    const raw = JSON.stringify(req.body);
+    const url = `${this.o.baseUrl}${req.path}`;
+    const headers = { 'content-type': 'application/json', 'user-agent': 'grainlify-bounty-agent/0.1', ...routingHeaders(req.routing) };
 
-```bash
-pnpm install
-docker compose up -d postgres
-TEST_DATABASE_URL=postgres://agent:agent-local-only@127.0.0.1:55432/agent pnpm test
-pnpm typecheck
+    const record = await this.o.receipts.insert({
+      id: randomUUID(),
+      purpose: req.purpose,
+      phase: req.phase,
+      model: String(req.body.model ?? ''),
+      path: req.path,
+      links: req.links ?? {},
+      routingRequested: { ...req.routing },
+      maxTokens: Number(req.body.max_tokens ?? req.body.max_completion_tokens ?? 0),
+      requestSha256: sha256(raw),
+      status: 'quoting',
+      createdAt: this.now(),
+    });
+    const update = (patch: Partial<InferenceCallRecord>) => this.o.receipts.update(record.id, patch);
 
-# Run everything locally at $0:
-pnpm mock                                   # mock UsePod gateway on :8402
-SIGNER_RAIL=mock SIGNER_TOKEN=… pnpm signer # signer on :8787
-DATABASE_URL=… SIGNER_TOKEN=… pnpm spike baseline overpay routing
-DATABASE_URL=… pnpm ledger                  # spend vs allocation
-```
+    // 1. Quote.
+    const q = await this.f(url, { method: 'POST', headers, body: raw });
+    if (q.status !== 402) {
+      const err = parseGatewayError(q.status, await q.text());
+      const rec = await update({ status: 'failed', error: `expected 402, got ${q.status}: ${err.message}`, latencyMs: Date.now() - started });
+      throw new X402CallFailed(rec.error!, rec, err);
+    }
+    const quote = decodeQuoteHeader(q.headers.get('payment-required'));
+    const rail = selectUsdcRail(quote, { method: 'POST', path: req.path, body: raw });
+    await update({ quoteId: quote.quote_id, quoteCapMicro: rail.amount_microunits, quoteExpiresAt: rail.expires_at ?? null, status: 'quoted' });
+    if (isExpired(rail, this.now())) {
+      const rec = await update({ status: 'failed', error: 'quote already expired' });
+      throw new X402CallFailed('quote already expired', rec);
+    }
 
-`pnpm spike` refuses to call the real gateway unless `SPIKE_CONFIRM=spend-real-money` is set.
+    // 2a. Surplus credit, if we believe there is enough.
+    if (this.surplusEstimateMicro >= rail.amount_microunits) {
+      const { payer_wallet, proof } = await this.o.payer.balanceProof(rail.quote_id);
+      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(balanceEnvelope(rail, payer_wallet, proof)) }, body: raw });
+      if (r.ok) return this.finish(record.id, r, { scheme: 'balance', payerWallet: payer_wallet, paidMicro: 0, feeMicro: 0, feeLamports: 0, txSignature: null, cap: rail.amount_microunits }, started);
+      const err = parseGatewayError(r.status, await r.text());
+      if (!isBalanceInsufficient(err)) {
+        const rec = await update({ status: 'failed', scheme: 'balance', error: err.message, latencyMs: Date.now() - started });
+        throw new X402CallFailed(`balance spend failed: ${err.message}`, rec, err);
+      }
+      // Our estimate was high. Nothing was spent; fall through to paying on-chain.
+      this.surplusEstimateMicro = 0;
+    }
 
-## Running the P2 loop on devnet
+    // 2b. On-chain. Reserve budget first; no reservation, no payment.
+    const amount = Math.max(rail.amount_microunits, this.o.prefundMicro ?? 0);
+    const reserved = await this.o.ledger.reserve(req.phase, amount, (this.o.feeReserveLamports ?? 0) * (this.o.solUsdCeilingPrice ?? 400) * 1e6);
+    const res = await this.o.payer.payQuote(rail);
+    if (res.kind === 'refused') {
+      await this.o.ledger.release(reserved.id);
+      const rec = await update({ status: 'failed', error: `signer refused: ${res.error}`, latencyMs: Date.now() - started });
+      throw new X402CallFailed(rec.error!, rec);
+    }
+    if (res.kind === 'unknown') {
+      await this.o.ledger.confirm(reserved.id, { amountMicro: amount, feeMicro: 0, feeLamports: 0 }); // Unknown result: charge full reservation.
+      const rec = await update({ status: 'failed', error: `payment unknown: ${res.error}`, latencyMs: Date.now() - started });
+      throw new X402CallFailed(rec.error!, rec);
+    }
 
-P2 pays **devnet test USDC only**. That is a mint we created, with no value. All inference goes to the local mock gateway. Keys live in `~/.config/grainlify-bounty-agent/`, never in this repo.
+    // 3. Finish call.
+    const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(onchainEnvelope(rail, res.payer_wallet, res.signature)) }, body: raw });
+    await this.o.ledger.confirm(reserved.id, { amountMicro: res.amount_micro, feeMicro: res.fee_micro, feeLamports: res.fee_lamports });
+    return this.finish(record.id, r, { scheme: 'onchain', payerWallet: res.payer_wallet, paidMicro: res.amount_micro, feeMicro: res.fee_micro, feeLamports: res.fee_lamports, txSignature: res.signature, cap: amount }, started);
+  }
 
-### Steps
-
-1. **Test token.** Create the test token and fund the payout float. The mint authority needs devnet SOL first.
-   ```
-   pnpm tsx scripts/test-usdc-setup.ts https://api.devnet.solana.com <mint-authority.json> <payout-float-pubkey>
-   ```
-2. **Processes.** Start them, each in its own shell:
-   - `pnpm mock`
-   - `SIGNER_RAIL=mock pnpm signer`
-   - `PAYOUT_NETWORK=solana-devnet … pnpm payout-signer`
-   - `pnpm agent`
-   - `npx smee-client --url <smee channel> --target http://127.0.0.1:3000/github/webhook`
-3. **Allowlist the sandbox repo.** `pnpm cli repo add Grainlify/grainlify-agent-sandbox`
-4. **Post a bounty.** `pnpm cli bounty propose Grainlify/grainlify-agent-sandbox <issue>`
-5. **Contributor steps.**
-   - Link a wallet with `pnpm tsx scripts/sign-link.ts <login> <keypair>` and post the output as a comment.
-   - Open a PR that says `Closes #<issue>`.
-6. **Merge and approve.** A maintainer merges, then `pnpm approve <payout-id>`.
+  private async finish(id: string, r: Response, details: any, started: number): Promise<CallResult> {
+    const record = await this.o.receipts.update(id, { ...details, status: 'complete', latencyMs: Date.now() - started });
+    if (!r.ok) throw new X402CallFailed(`call failed: ${await r.text()}`, record);
+    return { record, response: await r.json() };
+  }
+}
