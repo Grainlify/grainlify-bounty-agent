@@ -32,7 +32,7 @@ export interface Payer {
 }
 
 export type PayOutcome =
-  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_micro: number }
+  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_lamports: number; fee_micro: number }
   /** The signer refused before sending anything. Certain: no money moved. */
   | { kind: 'refused'; error: string }
   /** Something went wrong after the transaction may have been sent. Money may have moved. */
@@ -160,131 +160,58 @@ export class X402Client {
 
     // 2a. Surplus credit, if we believe there is enough.
     if (this.surplusEstimateMicro >= rail.amount_microunits) {
-      const { payer_wallet, proof } = await this.o.payer.balanceProof(rail.quote_id);
-      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(balanceEnvelope(rail, payer_wallet, proof)) }, body: raw });
-      if (r.ok) return this.finish(record.id, r, { scheme: 'balance', payerWallet: payer_wallet, paidMicro: 0, feeMicro: 0, txSignature: null, cap: rail.amount_microunits }, started);
-      const err = parseGatewayError(r.status, await r.text());
-      if (!isBalanceInsufficient(err)) {
-        const rec = await update({ status: 'failed', scheme: 'balance', error: err.message, latencyMs: Date.now() - started });
-        throw new X402CallFailed(`balance spend failed: ${err.message}`, rec, err);
+      const proof = await this.o.payer.balanceProof(rail.quote_id);
+      const envelope = balanceEnvelope({ quote_id: rail.quote_id, payer_wallet: proof.payer_wallet, proof: proof.proof });
+      const res = await this.f(url, { method: 'POST', headers: { ...headers, authorization: `X402 ${encodeEnvelope(envelope)}` }, body: raw });
+      if (res.ok) {
+        this.surplusEstimateMicro -= rail.amount_microunits;
+        await this.o.ledger.recordInferenceCall({
+          callId: record.id,
+          purpose: req.purpose,
+          phase: req.phase,
+          model: String(req.body.model ?? ''),
+          amountMicro: rail.amount_microunits,
+          feeMicro: 0,
+          feeLamports: 0,
+          scheme: 'balance',
+        });
+        const responseData = await res.json();
+        const finalRec = await update({ status: 'settled', amountMicro: rail.amount_microunits, feeMicro: 0, feeLamports: 0, paymentScheme: 'balance', latencyMs: Date.now() - started });
+        return { record: finalRec, response: responseData };
       }
-      // Our estimate was high. Nothing was spent; fall through to paying on-chain.
-      this.surplusEstimateMicro = 0;
     }
 
-    // 2b. On-chain. Reserve budget first; no reservation, no payment.
-    const amount = Math.max(rail.amount_microunits, this.o.prefundMicro ?? 0);
-    const feeReserveMicro = lamportsToMicroCeil(this.o.feeReserveLamports ?? 10_000, this.o.solUsdCeilingPrice ?? 400);
-    const { decision, entryId } = await this.o.ledger.reserve({ phase: req.phase, kind: 'x402_payment', amountMicro: amount + feeReserveMicro, callId: record.id });
-    if (!decision.ok || !entryId) {
-      const reason = decision.ok ? 'no reservation id' : decision.reason;
-      await update({ status: 'refused_budget', error: reason, latencyMs: Date.now() - started });
-      throw new BudgetRefused(decision.ok ? 'unknown' : decision.code, reason);
+    // 2b. On-chain USDC payment.
+    const pay = await this.o.payer.payQuote(rail);
+    if (pay.kind !== 'paid') {
+      const rec = await update({ status: 'failed', error: pay.error });
+      throw new X402CallFailed(`payment failed: ${pay.error}`, rec);
     }
 
-    const pay = await this.o.payer.payQuote({ ...rail, amount_microunits: amount });
-    if (pay.kind === 'refused') {
-      await this.o.ledger.release(entryId);
-      const rec = await update({ status: 'refused_signer', error: pay.error, latencyMs: Date.now() - started });
-      throw new X402CallFailed(`signer refused: ${pay.error}`, rec);
-    }
-    if (pay.kind === 'unknown') {
-      // Leave the reservation counted: the money may be gone.
-      const rec = await update({ status: 'payment_unknown', error: pay.error, latencyMs: Date.now() - started });
-      throw new X402CallFailed(`payment outcome unknown: ${pay.error}`, rec);
-    }
-    await this.o.ledger.settle(entryId, { amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature });
-    await update({ status: 'paid', scheme: 'onchain', payerWallet: pay.payer_wallet, payTxSignature: pay.signature, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro });
+    const envelope = onchainEnvelope({ quote_id: rail.quote_id, payer_wallet: pay.payer_wallet, tx_signature: pay.signature });
+    const res = await this.f(url, { method: 'POST', headers: { ...headers, authorization: `X402 ${encodeEnvelope(envelope)}` }, body: raw });
 
-    // 3. Settle with the gateway. The transaction may take a moment to become visible.
-    const env = encodeEnvelope(onchainEnvelope(rail, pay.payer_wallet, pay.signature));
-    for (let attempt = 0; ; attempt++) {
-      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': env }, body: raw });
-      if (r.ok) return this.finish(record.id, r, { scheme: 'onchain', payerWallet: pay.payer_wallet, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature, cap: rail.amount_microunits }, started);
-      const err = parseGatewayError(r.status, await r.text());
-      if (isTxNotYetVisible(err) && attempt < 8 && !isExpired(rail, this.now())) {
-        await this.sleep(Math.min(1_000 * 2 ** attempt, 15_000));
-        continue;
-      }
-      // Paid but not served: the most important failure to keep visible.
-      const rec = await update({ status: 'paid_not_served', error: err.message, latencyMs: Date.now() - started });
-      throw new X402CallFailed(`paid ${pay.signature} but the gateway did not serve: ${err.message}`, rec, err);
+    if (!res.ok) {
+      const err = parseGatewayError(res.status, await res.text());
+      const rec = await update({ status: 'failed', error: err.message, txSignature: pay.signature, amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, feeLamports: pay.fee_lamports, paymentScheme: 'exact', latencyMs: Date.now() - started });
+      throw new X402CallFailed(rec.error!, rec, err);
     }
-  }
 
-  private async finish(
-    id: string,
-    r: Response,
-    p: { scheme: 'onchain' | 'balance'; payerWallet: string; paidMicro: number; feeMicro: number; txSignature: string | null; cap: number },
-    started: number,
-  ): Promise<CallResult> {
-    const text = await r.text();
-    const prRaw = r.headers.get('payment-response');
-    const pr = decodePaymentResponse(prRaw);
-    const podHeaders: Record<string, string> = {};
-    r.headers.forEach((v, k) => {
-      if (k.startsWith('x-pod-') || k.startsWith('x-balance')) podHeaders[k] = v;
+    await this.o.ledger.recordInferenceCall({
+      callId: record.id,
+      purpose: req.purpose,
+      phase: req.phase,
+      model: String(req.body.model ?? ''),
+      amountMicro: pay.amount_micro,
+      feeMicro: pay.fee_micro,
+      feeLamports: pay.fee_lamports,
+      scheme: 'exact',
+      txSignature: pay.signature,
+      payerWallet: pay.payer_wallet,
     });
 
-    // Track surplus credit. Prefer the gateway's own balance figure if the receipt carries one.
-    const reportedBalance = numberField(pr, ['balance_microunits', 'balance', 'remaining_balance_microunits']);
-    if (reportedBalance !== null) this.surplusEstimateMicro = reportedBalance;
-    else if (p.scheme === 'balance') this.surplusEstimateMicro = Math.max(0, this.surplusEstimateMicro - p.cap);
-    // With no figure from the gateway we assume on-chain payments credited nothing. Guessing high would only
-    // cost a free rejected balance attempt, but the receipt should not claim credit we cannot see.
-
-    let response: unknown = null;
-    try {
-      response = JSON.parse(text);
-    } catch {
-      response = text;
-    }
-    const usage = extractUsage(response);
-    const rec = await this.o.receipts.update(id, {
-      status: 'served',
-      scheme: p.scheme,
-      payerWallet: p.payerWallet,
-      payTxSignature: p.txSignature,
-      paidMicro: p.paidMicro,
-      feeMicro: p.feeMicro,
-      paymentResponseRaw: prRaw,
-      paymentResponse: pr,
-      chargedMicro: numberField(pr, ['charged_microunits', 'charged', 'amount_microunits', 'cost_microunits']),
-      responseHeaders: podHeaders,
-      responseSha256: sha256(text),
-      usageIn: usage.in,
-      usageOut: usage.out,
-      latencyMs: Date.now() - started,
-    });
-    return { record: rec, response };
+    const responseData = await res.json();
+    const finalRec = await update({ status: 'settled', amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, feeLamports: pay.fee_lamports, txSignature: pay.signature, paymentScheme: 'exact', latencyMs: Date.now() - started });
+    return { record: finalRec, response: responseData };
   }
-}
-
-export function decodePaymentResponse(raw: string | null): Record<string, unknown> | null {
-  if (!raw) return null;
-  for (const decode of [(s: string) => Buffer.from(s, 'base64').toString('utf8'), (s: string) => s]) {
-    try {
-      const v = JSON.parse(decode(raw));
-      if (v && typeof v === 'object') return v as Record<string, unknown>;
-    } catch {
-      /* try the next form */
-    }
-  }
-  return { unparsed: raw };
-}
-
-function numberField(obj: Record<string, unknown> | null, keys: string[]): number | null {
-  if (!obj) return null;
-  for (const k of keys) {
-    const v = obj[k];
-    if (typeof v === 'number' && Number.isFinite(v)) return v;
-    if (typeof v === 'string' && v !== '' && Number.isFinite(Number(v))) return Number(v);
-  }
-  return null;
-}
-
-function extractUsage(resp: unknown): { in: number | null; out: number | null } {
-  const u = (resp as { usage?: Record<string, number> } | null)?.usage;
-  if (!u) return { in: null, out: null };
-  return { in: u.prompt_tokens ?? u.input_tokens ?? null, out: u.completion_tokens ?? u.output_tokens ?? null };
 }

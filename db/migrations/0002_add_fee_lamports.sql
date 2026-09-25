@@ -1,0 +1,1 @@
+ALTER TABLE inference_calls ADD COLUMN fee_lamports BIGINT NOT NULL DEFAULT 0;
