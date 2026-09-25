@@ -38,10 +38,11 @@ class FakeRail implements PaymentRail {
 }
 
 function setup(env: Record<string, string> = {}) {
-  const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'signer-')), 'j.sqlite'), 'mock');
+  const path = join(mkdtempSync(join(tmpdir(), 'signer-')), 'j.sqlite');
+  const journal = new Journal(path, 'mock');
   const rail = new FakeRail();
   const signer = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400', ...env }), journal, rail);
-  return { journal, rail, signer };
+  return { path, journal, rail, signer };
 }
 
 describe('signer policy', () => {
@@ -81,12 +82,17 @@ describe('signer policy', () => {
   });
 
   it('pays each quote at most once and replays the same proof', async () => {
-    const { signer, rail } = setup();
+    const { path, signer, rail, journal } = setup();
     const r = req(35);
     const a = await signer.payQuote(r);
-    const b = await signer.payQuote(r);
-    expect(a.ok && b.ok && a.signature === b.signature).toBe(true);
+    journal.close();
+    const reopened = new Journal(path, 'mock');
+    const replay = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400' }), reopened, rail);
+    const b = await replay.payQuote(r);
+    expect(a.ok && b.ok && a.signature === b.signature && a.fee_lamports === b.fee_lamports).toBe(true);
+    expect(b).toMatchObject({ ok: true, fee_lamports: 5_010, fee_micro: 2_004 });
     expect(rail.sent).toHaveLength(1);
+    reopened.close();
   });
 
   it('stops counting a payment only when nothing was sent', async () => {
@@ -120,6 +126,28 @@ describe('signer policy', () => {
 });
 
 describe('journal mode binding', () => {
+  it('adds the nullable fee column when opening an existing journal', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const path = join(mkdtempSync(join(tmpdir(), 'journal-migration-')), 'j.sqlite');
+    const oldQuote = '00000000-0000-4000-8000-000000000001';
+    new Journal(path, 'mock').close();
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      ALTER TABLE inference_payments DROP COLUMN fee_lamports;
+      INSERT INTO inference_payments (quote_id, pay_to, amount_micro, fee_reserve_micro, fee_micro, status, tx_signature)
+      VALUES ('${oldQuote}', 'destination', 35, 4000, 2004, 'confirmed', 'old-signature');
+    `);
+    legacy.close();
+
+    const migrated = new Journal(path, 'mock');
+    expect(migrated.byQuote(oldQuote)).toMatchObject({ fee_micro: 2_004, fee_lamports: null, status: 'confirmed' });
+    const rail = new FakeRail();
+    const signer = new Signer(signerConfig({ SIGNER_SOL_USD_CEILING_PRICE: '400' }), migrated, rail);
+    expect(await signer.payQuote(req(35, { quote_id: oldQuote }))).toMatchObject({ ok: false, status: 503 });
+    expect(rail.sent).toEqual([]);
+    migrated.close();
+  });
+
   it('refuses to back a real signer with a journal of mock payments, and vice versa', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'bind-')), 'j.sqlite');
     new Journal(path, 'mock').close();

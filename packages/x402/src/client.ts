@@ -32,7 +32,7 @@ export interface Payer {
 }
 
 export type PayOutcome =
-  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_micro: number }
+  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_lamports: number; fee_micro: number }
   /** The signer refused before sending anything. Certain: no money moved. */
   | { kind: 'refused'; error: string }
   /** Something went wrong after the transaction may have been sent. Money may have moved. */
@@ -162,7 +162,7 @@ export class X402Client {
     if (this.surplusEstimateMicro >= rail.amount_microunits) {
       const { payer_wallet, proof } = await this.o.payer.balanceProof(rail.quote_id);
       const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(balanceEnvelope(rail, payer_wallet, proof)) }, body: raw });
-      if (r.ok) return this.finish(record.id, r, { scheme: 'balance', payerWallet: payer_wallet, paidMicro: 0, feeMicro: 0, txSignature: null, cap: rail.amount_microunits }, started);
+      if (r.ok) return this.finish(record.id, r, { scheme: 'balance', payerWallet: payer_wallet, paidMicro: 0, feeMicro: 0, feeLamports: 0, txSignature: null, cap: rail.amount_microunits }, started);
       const err = parseGatewayError(r.status, await r.text());
       if (!isBalanceInsufficient(err)) {
         const rec = await update({ status: 'failed', scheme: 'balance', error: err.message, latencyMs: Date.now() - started });
@@ -194,13 +194,13 @@ export class X402Client {
       throw new X402CallFailed(`payment outcome unknown: ${pay.error}`, rec);
     }
     await this.o.ledger.settle(entryId, { amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature });
-    await update({ status: 'paid', scheme: 'onchain', payerWallet: pay.payer_wallet, payTxSignature: pay.signature, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro });
+    await update({ status: 'paid', scheme: 'onchain', payerWallet: pay.payer_wallet, payTxSignature: pay.signature, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, feeLamports: pay.fee_lamports });
 
     // 3. Settle with the gateway. The transaction may take a moment to become visible.
     const env = encodeEnvelope(onchainEnvelope(rail, pay.payer_wallet, pay.signature));
     for (let attempt = 0; ; attempt++) {
       const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': env }, body: raw });
-      if (r.ok) return this.finish(record.id, r, { scheme: 'onchain', payerWallet: pay.payer_wallet, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature, cap: rail.amount_microunits }, started);
+      if (r.ok) return this.finish(record.id, r, { scheme: 'onchain', payerWallet: pay.payer_wallet, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, feeLamports: pay.fee_lamports, txSignature: pay.signature, cap: rail.amount_microunits }, started);
       const err = parseGatewayError(r.status, await r.text());
       if (isTxNotYetVisible(err) && attempt < 8 && !isExpired(rail, this.now())) {
         await this.sleep(Math.min(1_000 * 2 ** attempt, 15_000));
@@ -215,7 +215,7 @@ export class X402Client {
   private async finish(
     id: string,
     r: Response,
-    p: { scheme: 'onchain' | 'balance'; payerWallet: string; paidMicro: number; feeMicro: number; txSignature: string | null; cap: number },
+    p: { scheme: 'onchain' | 'balance'; payerWallet: string; paidMicro: number; feeMicro: number; feeLamports: number; txSignature: string | null; cap: number },
     started: number,
   ): Promise<CallResult> {
     const text = await r.text();
@@ -247,6 +247,7 @@ export class X402Client {
       payTxSignature: p.txSignature,
       paidMicro: p.paidMicro,
       feeMicro: p.feeMicro,
+      feeLamports: p.feeLamports,
       paymentResponseRaw: prRaw,
       paymentResponse: pr,
       chargedMicro: numberField(pr, ['charged_microunits', 'charged', 'amount_microunits', 'cost_microunits']),

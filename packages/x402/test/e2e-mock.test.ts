@@ -67,6 +67,7 @@ describe('x402 end to end against the mock gateway', () => {
     expect(record.quoteId).toMatch(/^[0-9a-f-]{36}$/);
     expect(record.payTxSignature).toBeTruthy();
     expect(record.paidMicro).toBe(record.quoteCapMicro);
+    expect(record).toMatchObject({ feeLamports: 5_000, feeMicro: 2_000 });
     expect(record.paymentResponse).toMatchObject({ quote_id: record.quoteId, scheme: 'onchain' });
     expect(record.usageOut).toBeGreaterThan(0);
     expect((response as { choices: { message: { content: string } }[] }).choices[0]!.message.content).toContain('gpt-oss-120b');
@@ -84,7 +85,7 @@ describe('x402 end to end against the mock gateway', () => {
     const spentAfterFirst = (await h.ledger.totals()).lifetimeMicro;
 
     const second = await h.client.call(chat('second'));
-    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, payTxSignature: null });
+    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, feeLamports: 0, payTxSignature: null });
     expect((await h.ledger.totals()).lifetimeMicro).toBe(spentAfterFirst);
     expect(h.journal.all()).toHaveLength(1);
   });

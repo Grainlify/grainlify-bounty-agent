@@ -85,8 +85,11 @@ export class Signer {
     if (!reservation.ok) {
       const ex = reservation.existing;
       if (ex?.status === 'confirmed' && ex.tx_signature) {
+        if (ex.fee_lamports === null) {
+          return refuse('confirmed payment has no recorded fee_lamports; refusing to report an estimated fee as exact', 503);
+        }
         // Idempotent replay of a payment that already landed: hand back the same proof, pay nothing.
-        return { ok: true, payer_wallet: this.address(), signature: ex.tx_signature, amount_micro: ex.amount_micro, fee_lamports: 0, fee_micro: ex.fee_micro ?? 0 };
+        return { ok: true, payer_wallet: this.address(), signature: ex.tx_signature, amount_micro: ex.amount_micro, fee_lamports: ex.fee_lamports, fee_micro: ex.fee_micro ?? 0 };
       }
       return refuse(reservation.reason, ex ? 409 : 403);
     }
@@ -105,7 +108,7 @@ export class Signer {
     try {
       const res = await prepared.broadcast();
       const feeMicro = lamportsToMicroCeil(res.feeLamports, this.cfg.solUsdCeilingPrice);
-      this.journal.markConfirmed(reservation.id, feeMicro);
+      this.journal.markConfirmed(reservation.id, feeMicro, res.feeLamports);
       return { ok: true, payer_wallet: this.address(), signature: res.signature, amount_micro: req.amount_microunits, fee_lamports: res.feeLamports, fee_micro: feeMicro };
     } catch (e) {
       // Possibly on-chain. It stays 'sent' and keeps counting until reconciled.

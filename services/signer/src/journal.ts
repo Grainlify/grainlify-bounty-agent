@@ -20,6 +20,7 @@ export interface PaymentRow {
   amount_micro: number;
   fee_reserve_micro: number;
   fee_micro: number | null;
+  fee_lamports: number | null;
   status: PaymentStatus;
   tx_signature: string | null;
   error: string | null;
@@ -46,6 +47,7 @@ export class Journal {
         amount_micro      INTEGER NOT NULL CHECK (amount_micro > 0),
         fee_reserve_micro INTEGER NOT NULL CHECK (fee_reserve_micro >= 0),
         fee_micro         INTEGER,
+        fee_lamports      INTEGER,
         status            TEXT NOT NULL CHECK (status IN ('reserved','sent','confirmed','failed_unsent')),
         tx_signature      TEXT UNIQUE,
         error             TEXT,
@@ -63,6 +65,10 @@ export class Journal {
         created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
       );
     `);
+    const paymentColumns = this.db.prepare(`PRAGMA table_info(inference_payments)`).all() as { name: string }[];
+    if (!paymentColumns.some((column) => column.name === 'fee_lamports')) {
+      this.db.exec(`ALTER TABLE inference_payments ADD COLUMN fee_lamports INTEGER`);
+    }
     const unbound = !this.db.prepare(`SELECT 1 FROM journal_meta`).get();
     const hasPayments = !!this.db.prepare(`SELECT 1 FROM inference_payments LIMIT 1`).get();
     // A journal from before binding existed, with payments in it: we can't tell mock from real, so refuse.
@@ -120,8 +126,8 @@ export class Journal {
     this.update(id, `status = 'sent', tx_signature = ?`, [txSignature], ['reserved']);
   }
 
-  markConfirmed(id: number, feeMicro: number) {
-    this.update(id, `status = 'confirmed', fee_micro = ?`, [feeMicro], ['sent']);
+  markConfirmed(id: number, feeMicro: number, feeLamports: number) {
+    this.update(id, `status = 'confirmed', fee_micro = ?, fee_lamports = ?`, [feeMicro, feeLamports], ['sent']);
   }
 
   markFailedUnsent(id: number, error: string) {
