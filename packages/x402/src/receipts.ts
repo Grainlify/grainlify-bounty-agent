@@ -44,6 +44,7 @@ export interface InferenceCallRecord {
   payerWallet?: string | null;
   payTxSignature?: string | null;
   paidMicro?: number | null;
+  feeLamports?: number | null;
   feeMicro?: number | null;
   chargedMicro?: number | null;
   paymentResponseRaw?: string | null;

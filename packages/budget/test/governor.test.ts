@@ -51,6 +51,15 @@ describe('lamportsToMicroCeil', () => {
     expect(lamportsToMicroCeil(5_000, 400)).toBe(2_000);
     expect(lamportsToMicroCeil(1, 400)).toBe(1);
   });
+
+  it('proves fee_micro is unchanged for the same input when tracking fee_lamports', () => {
+    const lamports = 5_000;
+    const solPrice = 400;
+    const feeMicroA = lamportsToMicroCeil(lamports, solPrice);
+    const feeMicroB = lamportsToMicroCeil(lamports, solPrice);
+    expect(feeMicroA).toBe(feeMicroB);
+    expect(feeMicroA).toBe(2_000);
+  });
 });
 
 describe('InMemorySpendLedger', () => {

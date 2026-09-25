@@ -67,6 +67,8 @@ describe('x402 end to end against the mock gateway', () => {
     expect(record.quoteId).toMatch(/^[0-9a-f-]{36}$/);
     expect(record.payTxSignature).toBeTruthy();
     expect(record.paidMicro).toBe(record.quoteCapMicro);
+    expect(record.feeLamports).toBe(5_000);
+    expect(record.feeMicro).toBe(2_000);
     expect(record.paymentResponse).toMatchObject({ quote_id: record.quoteId, scheme: 'onchain' });
     expect(record.usageOut).toBeGreaterThan(0);
     expect((response as { choices: { message: { content: string } }[] }).choices[0]!.message.content).toContain('gpt-oss-120b');
