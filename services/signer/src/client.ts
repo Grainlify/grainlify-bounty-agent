@@ -35,7 +35,16 @@ export class SignerClient implements Payer {
     }
     const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
     if (r.ok) {
-      return { kind: 'paid', payer_wallet: String(body.payer_wallet), signature: String(body.signature), amount_micro: Number(body.amount_micro), fee_micro: Number(body.fee_micro) };
+      // fee_lamports is the real network fee from the confirmed transaction; null if the signer did not send a usable figure.
+      const feeLamports = body.fee_lamports == null ? null : Number(body.fee_lamports);
+      return {
+        kind: 'paid',
+        payer_wallet: String(body.payer_wallet),
+        signature: String(body.signature),
+        amount_micro: Number(body.amount_micro),
+        fee_micro: Number(body.fee_micro),
+        fee_lamports: feeLamports !== null && Number.isFinite(feeLamports) && feeLamports >= 0 ? feeLamports : null,
+      };
     }
     // 4xx: refused before anything was sent. 5xx: sent or unknown.
     const error = String(body.error ?? r.status);

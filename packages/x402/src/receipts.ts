@@ -45,6 +45,8 @@ export interface InferenceCallRecord {
   payTxSignature?: string | null;
   paidMicro?: number | null;
   feeMicro?: number | null;
+  /** The real network fee from the confirmed transaction; null when there was no on-chain payment. */
+  feeLamports?: number | null;
   chargedMicro?: number | null;
   paymentResponseRaw?: string | null;
   paymentResponse?: Record<string, unknown> | null;
