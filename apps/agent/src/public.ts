@@ -11,6 +11,7 @@
 
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
+import { computeMetrics, type InferenceMetrics } from '../../../packages/budget/src/metrics.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 
@@ -157,6 +158,16 @@ export class PublicApi {
     }
     events.sort((a, b) => b.at.localeCompare(a.at));
 
+    // Aggregates over every served call, not just the recent window shown in
+    // `events` above: the ledger page's headline numbers come from these.
+    const served = await this.db.query(`SELECT scheme, paid_micro, fee_micro, charged_micro FROM inference_calls WHERE status = 'served'`);
+    const merged = await this.db.query(`SELECT count(*)::int AS n FROM submissions WHERE state = 'merged'`);
+    const microOrNull = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    const metrics = computeMetrics(
+      served.rows.map((r) => ({ scheme: r.scheme ?? null, paidMicro: microOrNull(r.paid_micro), feeMicro: microOrNull(r.fee_micro), chargedMicro: microOrNull(r.charged_micro) })),
+      Number(merged.rows[0]?.n ?? 0),
+    );
+
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();
     const paid = bounties.filter((b) => b.payout);
     return {
@@ -171,6 +182,12 @@ export class PublicApi {
         inferenceCeilingMicro: 5_000_000,
         feesInMicro: null as number | null, // not tracked until GRAIN launches
       },
+      // Served-call cost aggregates. While inference is mocked the money
+      // figures stay null — mock amounts are play money (see the honesty rules
+      // at the top of this file) — but the call counts are real records.
+      inference: (mock
+        ? { servedCalls: metrics.servedCalls, servedByScheme: metrics.servedByScheme, inferenceMicro: null, networkFeesMicro: null, costPerServedCallMicro: null, costPerMergedPrMicro: null }
+        : metrics) satisfies InferenceMetrics,
       budget: PHASES.map((p) => ({ phase: p, allocationMicro: PHASE_ALLOCATION_MICRO[p], spentMicro: totals ? totals.byPhase[p] : 0 })),
       events: events.slice(0, 300),
     };
