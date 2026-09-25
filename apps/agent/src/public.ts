@@ -11,6 +11,7 @@
 
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
+import { computeMetrics, type LedgerMetricAggregate } from '../../../packages/budget/src/metrics.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 
@@ -157,6 +158,31 @@ export class PublicApi {
     }
     events.sort((a, b) => b.at.localeCompare(a.at));
 
+    const metricRows = await this.db.query<LedgerMetricAggregate>(
+      `SELECT
+         COUNT(*)::text AS served_call_count,
+         (COUNT(*) FILTER (WHERE scheme = 'onchain'))::text AS on_chain_call_count,
+         (COUNT(*) FILTER (WHERE scheme = 'balance'))::text AS surplus_credit_call_count,
+         (COUNT(*) FILTER (WHERE scheme IS NULL))::text AS unclassified_call_count,
+         -- charged_micro is the service charge; paid_micro can be a quote cap.
+         CASE
+           WHEN COUNT(*) = 0 THEN '0'
+           WHEN COUNT(charged_micro) = COUNT(*) THEN SUM(charged_micro)::text
+           ELSE NULL
+         END AS inference_total_micro,
+         CASE
+           WHEN COUNT(*) = 0 THEN '0'
+           WHEN COUNT(fee_micro) = COUNT(*) THEN SUM(fee_micro)::text
+           ELSE NULL
+         END AS network_fee_total_micro,
+         (SELECT COUNT(*)::text FROM submissions WHERE state = 'merged') AS merged_pr_count
+       FROM inference_calls
+       WHERE status = 'served'`,
+    );
+    const metricRow = metricRows.rows[0];
+    if (!metricRow) throw new Error('Public ledger metrics query returned no aggregate row');
+    const metrics = computeMetrics(metricRow, mock);
+
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();
     const paid = bounties.filter((b) => b.payout);
     return {
@@ -173,6 +199,7 @@ export class PublicApi {
       },
       budget: PHASES.map((p) => ({ phase: p, allocationMicro: PHASE_ALLOCATION_MICRO[p], spentMicro: totals ? totals.byPhase[p] : 0 })),
       events: events.slice(0, 300),
+      metrics,
     };
   }
 }
