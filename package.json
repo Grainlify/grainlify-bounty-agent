@@ -13,6 +13,7 @@
     "signer": "tsx services/signer/src/main.ts",
     "spike": "tsx scripts/spike.ts",
     "ledger": "tsx scripts/ledger.ts",
+    "docs:x402-errors": "tsx scripts/generate-x402-errors-doc.ts",
     "agent": "tsx apps/agent/src/main.ts",
     "cli": "tsx apps/agent/src/cli.ts",
     "approve": "tsx apps/agent/src/cli.ts approve",
