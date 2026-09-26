@@ -11,6 +11,7 @@ import { allowedPayoutNetworks, p2Config } from './config.ts';
 import { GitHubAppClient } from './github.ts';
 import { PayoutSignerClient } from './payout-client.ts';
 import { DrawService } from './draw-service.ts';
+import { assertMintsAgree } from './mint-check.ts';
 import { BountyService } from './service.ts';
 import { PublicApi, publicOrigins } from './public.ts';
 
@@ -69,6 +70,11 @@ export async function wire() {
   // becoming "temporary" and permanent.
   const payoutsApiToken = env.PAYOUTS_API_TOKEN?.trim() || undefined;
   if (payoutsApiToken && payoutsApiToken.length < 32) throw new Error('PAYOUTS_API_TOKEN must be at least 32 characters');
+  // Before anything can create a bounty: does the service that will sign the
+  // transfer agree with us about what we are paying? A bounty keeps its mint
+  // forever, so this has to happen at boot, not at payout.
+  await assertMintsAgree({ network: cfg.network, mints: cfg.mints }, env);
+
   const draw = new DrawService({ db, gh, now: () => new Date() });
   return {
     db, gh, service, cfg, draw, linkCountersignKey,

@@ -20,6 +20,16 @@ export function createPayoutServer(signer: PayoutSigner, journal: PayoutJournal,
       const auth = Buffer.from(req.headers.authorization ?? '');
       if (auth.length !== expected.length || !timingSafeEqual(auth, expected)) return send(401, { error: 'unauthorized' });
       if (req.method === 'GET' && req.url === '/v1/wallet') return send(200, { address: signer.address() });
+      // What this signer believes it is paying, so the agent can check at boot
+      // that the two agree. A mint mismatch between the services has now cost
+      // three rounds of diagnosis, and a bounty row keeps its mint forever:
+      // by the time a payout fails, the unpayable rows already exist.
+      //
+      // Mint addresses are public and this endpoint is behind the same bearer
+      // token as everything else here. It reports configuration, never a key.
+      if (req.method === 'GET' && req.url === '/v1/config') {
+        return send(200, { network: signer.network(), mints: signer.mints() });
+      }
       if (req.method === 'GET' && req.url === '/v1/payouts') return send(200, { payouts: journal.all() });
       if (req.method === 'POST' && req.url === '/v1/payout/pay') {
         const body = (await readJson(req)) as { approval: Approval };

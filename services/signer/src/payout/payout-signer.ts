@@ -72,6 +72,14 @@ export class PayoutSigner {
     return this.rail.address();
   }
 
+  /** Configuration this signer will actually enforce, for the agent's boot check. */
+  network() {
+    return this.cfg.network;
+  }
+  mints() {
+    return this.cfg.mints;
+  }
+
   async pay(approval: Approval): Promise<PayoutOutcome> {
     const refuse = (error: string, status = 403): PayoutOutcome => ({ ok: false, status, error });
     const now = this.now();
