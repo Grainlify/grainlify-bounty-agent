@@ -7,7 +7,7 @@ import type { Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { budgetConfig } from '../../budget/src/governor.ts';
+import { budgetConfig, lamportsToMicroCeil } from '../../budget/src/governor.ts';
 import { InMemorySpendLedger } from '../../budget/src/ledger.ts';
 import { createMockGateway, type MockOptions } from '../../mock-gateway/src/gateway.ts';
 import { SignerClient } from '../../../services/signer/src/client.ts';
@@ -76,6 +76,17 @@ describe('x402 end to end against the mock gateway', () => {
     expect(h.gw.state.settlements).toHaveLength(1);
   });
 
+  it('records the real network fee in lamports, while fee_micro keeps the ceiling-price conversion', async () => {
+    const h = await harness();
+    const { record } = await h.client.call(chat('fee accounting'));
+
+    // The mock rail confirms every transfer with a 5,000-lamport fee: that exact figure is what the receipt must carry.
+    expect(record.feeLamports).toBe(5_000);
+    // fee_micro is unchanged for the same input: lamports at the deliberately high $400 SOL ceiling, rounded up.
+    expect(record.feeMicro).toBe(lamportsToMicroCeil(5_000, 400));
+    expect(record.feeMicro).toBe(2_000);
+  });
+
   it('draws down surplus credit with a signed proof: no second on-chain payment, no second fee', async () => {
     const h = await harness();
     // Credit comes from the unused part of a cap: quote a large max_tokens and
@@ -88,7 +99,7 @@ describe('x402 end to end against the mock gateway', () => {
     const spentAfterFirst = (await h.ledger.totals()).lifetimeMicro;
 
     const second = await h.client.call(chat('second'));
-    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, payTxSignature: null });
+    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, feeLamports: null, payTxSignature: null });
     expect((await h.ledger.totals()).lifetimeMicro).toBe(spentAfterFirst);
     expect(h.journal.all()).toHaveLength(1);
   });

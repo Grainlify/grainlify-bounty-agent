@@ -23,8 +23,8 @@ describe.skipIf(!url)('postgres receipts and spend ledger', () => {
     const store = new PgReceiptStore(pool);
     const id = randomUUID();
     await store.insert({ id, purpose: 'spike', phase: 'P1', model: 'gpt-oss-120b', path: '/proxy/x402/v1/chat/completions', links: { repo: 'a/b', issueNumber: 7 }, routingRequested: { mode: 'marketplace-only' }, maxTokens: 32, requestSha256: 'ab', status: 'quoting', createdAt: new Date() });
-    const rec = await store.update(id, { status: 'served', scheme: 'onchain', paidMicro: 35, feeMicro: 2_004, paymentResponse: { ok: true }, responseHeaders: { 'x-pod-route': 'marketplace' } });
-    expect(rec).toMatchObject({ id, status: 'served', paidMicro: 35, feeMicro: 2_004, links: { repo: 'a/b', issueNumber: 7 }, paymentResponse: { ok: true } });
+    const rec = await store.update(id, { status: 'served', scheme: 'onchain', paidMicro: 35, feeMicro: 2_004, feeLamports: 5_010, paymentResponse: { ok: true }, responseHeaders: { 'x-pod-route': 'marketplace' } });
+    expect(rec).toMatchObject({ id, status: 'served', paidMicro: 35, feeMicro: 2_004, feeLamports: 5_010, links: { repo: 'a/b', issueNumber: 7 }, paymentResponse: { ok: true } });
   });
 
   it('never lets concurrent reservations cross the ceiling', async () => {

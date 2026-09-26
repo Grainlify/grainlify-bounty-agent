@@ -19,9 +19,9 @@ for (const p of PHASES) {
 }
 console.log(`Total   ${fmt(HARD_LIFETIME_CEILING_MICRO).padEnd(12)} ${fmt(t.lifetimeMicro).padEnd(12)} ${fmt(HARD_LIFETIME_CEILING_MICRO - t.lifetimeMicro)}`);
 
-const calls = await pool.query(`SELECT status, scheme, count(*)::int AS n, COALESCE(sum(paid_micro),0)::bigint AS paid, COALESCE(sum(fee_micro),0)::bigint AS fees FROM inference_calls GROUP BY 1,2 ORDER BY 1,2`);
+const calls = await pool.query(`SELECT status, scheme, count(*)::int AS n, COALESCE(sum(paid_micro),0)::bigint AS paid, COALESCE(sum(fee_micro),0)::bigint AS fees, COALESCE(sum(fee_lamports),0)::bigint AS fee_lamports FROM inference_calls GROUP BY 1,2 ORDER BY 1,2`);
 console.log('\nCalls by status/scheme:');
-for (const r of calls.rows) console.log(`  ${r.status}/${r.scheme ?? '-'}: ${r.n} calls, paid ${fmt(Number(r.paid))}, fees ${fmt(Number(r.fees))}`);
+for (const r of calls.rows) console.log(`  ${r.status}/${r.scheme ?? '-'}: ${r.n} calls, paid ${fmt(Number(r.paid))}, fees ${fmt(Number(r.fees))} (ceiling estimate), real network fees ${r.fee_lamports} lamports`);
 
 // --- what a call actually costs, and what it would cost at list price ---
 const raw = await pool.query(`
