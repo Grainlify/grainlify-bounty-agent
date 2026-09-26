@@ -135,10 +135,24 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         }
         if (req.method !== 'POST') return reply(405, { error: 'method_not_allowed' });
         let body: Record<string, unknown>;
+        let raw: Buffer;
         try {
-          body = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8')) as Record<string, unknown>;
+          raw = await readRaw(req, 16 * 1024);
         } catch {
-          return reply(400, { error: 'malformed', detail: 'the body must be JSON under 16 KB' });
+          // Reading the body failed outright: too large, or the connection
+          // ended early. Distinct from "arrived but is not JSON".
+          note = ' read=refused reason=body_unreadable';
+          return reply(400, { error: 'body_unreadable', detail: 'the request body could not be read' });
+        }
+        try {
+          body = JSON.parse(raw.toString('utf8')) as Record<string, unknown>;
+        } catch {
+          // This branch used to return without logging anything, which is how a
+          // malformed body spent a round of diagnosis being mistaken for a bad
+          // signature: same 400, no note, nothing to tell them apart. The size
+          // and content type say whether the body went missing in transit.
+          note = ` read=refused reason=malformed bytes=${raw.length} ctype=${String(req.headers['content-type'] ?? 'none')}`;
+          return reply(400, { error: 'malformed', detail: `the body must be JSON under 16 KB; received ${raw.length} bytes` });
         }
         const r = await d.service.readLinkFromSession({ message: body?.message, countersignature: body?.countersignature });
         // Whose link was asked for and whether one exists, without putting the
