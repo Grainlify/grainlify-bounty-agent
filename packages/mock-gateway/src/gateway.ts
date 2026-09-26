@@ -19,8 +19,19 @@ const BASE_USDC = '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913';
 const QUOTE_TTL_MS = 5 * 60_000;
 
 export interface MockOptions {
-  /** What happens to on-chain payment above the quote cap. Unknown live; the spike settles it. */
+  /**
+   * Retained so tests can state the fact explicitly. Measured live on
+   * 2026-09-25: payment above the cap is forfeited, never credited. 'credit'
+   * is no longer reachable from the client, which cannot overpay.
+   */
   overpayPolicy?: 'credit' | 'forfeit';
+  /**
+   * Whether the receipt carries balance_microunits. The live gateway does NOT
+   * (measured 2026-09-25: a settled PAYMENT-RESPONSE has max_microunits and
+   * charged_microunits and no balance), so set this false to reproduce live
+   * conditions, where a client must track its own credit.
+   */
+  reportBalance?: boolean;
   /** Transfers become visible to the gateway this long after they are posted. */
   confirmationDelayMs?: number;
   /** Produces the assistant text for a request. */
@@ -164,12 +175,14 @@ export function createMockGateway(opts: MockOptions = {}): { server: Server; sta
       const outputTokens = Math.min(maxTokens, estimateTokens(text));
       const actual = Math.min(quote.capMicro, priceMicro(model, quote.inputTokens, outputTokens) ?? quote.capMicro);
       let credited = quote.capMicro - actual;
-      if (scheme === 'onchain' && (opts.overpayPolicy ?? 'credit') === 'credit') credited += paidMicro - quote.capMicro;
+      // Default matches the live gateway: the excess is forfeited.
+      if (scheme === 'onchain' && opts.overpayPolicy === 'credit') credited += paidMicro - quote.capMicro;
       state.balances.set(wallet, (state.balances.get(wallet) ?? 0) + credited);
       state.settledQuotes.add(quote.quoteId);
 
       // ASSUMED shape: the live PAYMENT-RESPONSE format is undocumented. The paid spike replaces this.
-      const receipt = { quote_id: quote.quoteId, scheme, network: SOLANA_MAINNET, charged_microunits: actual, credited_microunits: credited, balance_microunits: state.balances.get(wallet), transaction: scheme === 'onchain' ? env.signature : null, mock: true };
+      const receipt: Record<string, unknown> = { quote_id: quote.quoteId, scheme, network: SOLANA_MAINNET, charged_microunits: actual, credited_microunits: credited, transaction: scheme === 'onchain' ? env.signature : null, mock: true };
+      if (opts.reportBalance !== false) receipt.balance_microunits = state.balances.get(wallet);
       const headers = { 'payment-response': Buffer.from(JSON.stringify(receipt)).toString('base64') };
       state.settlements.push({ quoteId: quote.quoteId, scheme, wallet, chargedMicro: actual, creditedMicro: credited, headers });
 

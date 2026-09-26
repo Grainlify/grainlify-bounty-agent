@@ -47,7 +47,13 @@ export function p2Config(over: Partial<AgentConfig> & Pick<AgentConfig, 'mints' 
     network: 'solana-devnet',
     defaultCurrency: 'USDC',
     gate: {
-      caps: { USDC: { perBountyMaxMinor: 50_000_000n, dailyMaxMinor: 150_000_000n } },
+      caps: {
+        USDC: { perBountyMaxMinor: 50_000_000n, dailyMaxMinor: 150_000_000n },
+        // Mirrors HARD_CAPS.ANSEM in the payout signer. Both sides cap
+        // independently; the gate refusing is not a substitute for the signer
+        // refusing, and neither trusts the other.
+        ANSEM: { perBountyMaxMinor: 6_000_000n, dailyMaxMinor: 10_000_000n },
+      },
       minAccountAgeDays: 30,
       allowedNetworks: ['solana-devnet', 'localnet'],
     },

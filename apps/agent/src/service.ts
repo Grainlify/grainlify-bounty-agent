@@ -12,6 +12,7 @@ import { verifyApproval, type Approval, type PayoutTerms } from '../../../packag
 import { evaluateGate, type GateFacts, type GateResult } from '../../../packages/gate/src/gate.ts';
 import { parseAndVerifyLinkComment } from '../../../packages/gate/src/link.ts';
 import { verifySessionLink, type SessionLinkRefusal } from '../../../packages/gate/src/session-link.ts';
+import { verifySessionRead } from '../../../packages/gate/src/session-read.ts';
 import type { X402Client } from '../../../packages/x402/src/client.ts';
 import type { InferenceCallRecord } from '../../../packages/x402/src/receipts.ts';
 import { X402_PATHS } from '../../../packages/x402/src/protocol.ts';
@@ -37,6 +38,10 @@ export interface Deps {
 export type SessionLinkOutcome =
   | { ok: true; status: 201 | 200; wallet: string; githubLogin: string; githubUserId: number; replaced: string | null; unchanged: boolean }
   | { ok: false; status: 400 | 409 | 503; error: SessionLinkRefusal | 'nonce_used' | 'wallet_linked_to_another_account' | 'session_links_off'; detail: string };
+
+export type SessionReadOutcome =
+  | { ok: true; status: 200; githubUserId: number; githubLogin: string; wallet: string | null; linkedAt: string | null }
+  | { ok: false; status: number; error: string; detail: string };
 
 const FOOTER = '\n\n<sub>Grainlify Agent · every reasoning step is inference bought on UsePod over x402 · payment depends only on a maintainer merge and a human approval.</sub>';
 
@@ -175,6 +180,35 @@ export class BountyService {
    * nonce is spent in the same transaction that stores the link, so a
    * refused or replayed request changes nothing.
    */
+  /**
+   * Answers "which wallet is linked to my GitHub account", for a caller who
+   * holds a Grainlify-countersigned read challenge.
+   *
+   * Read-only on purpose: it consumes no nonce and writes nothing. A read
+   * challenge is replayable within its ten-minute window, which is fine —
+   * replaying it tells you what you already knew about your own account. The
+   * link path burns its nonce because a replay THERE would be a second link.
+   */
+  async readLinkFromSession(input: { message: unknown; countersignature: unknown }): Promise<SessionReadOutcome> {
+    if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
+    const v = verifySessionRead(input, this.d.linkCountersignKey, new Date());
+    if (!v.ok) return { ok: false, status: 400, error: v.code, detail: v.reason };
+    const f = v.fields;
+    const r = await this.d.db.query<{ address: string; linked_at: Date }>(
+      `SELECT address, linked_at FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`,
+      [f.githubUserId],
+    );
+    const row = r.rows[0];
+    return {
+      ok: true,
+      status: 200,
+      githubUserId: f.githubUserId,
+      githubLogin: f.login,
+      wallet: row?.address ?? null,
+      linkedAt: row ? new Date(row.linked_at).toISOString() : null,
+    };
+  }
+
   async linkWalletFromSession(input: { message: unknown; countersignature: unknown; walletSignature: unknown }): Promise<SessionLinkOutcome> {
     if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
     const v = verifySessionLink(input, this.d.linkCountersignKey, this.now());

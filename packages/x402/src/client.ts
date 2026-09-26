@@ -68,12 +68,6 @@ export interface X402ClientOptions {
   /** Worst-case network fee we reserve per on-chain payment, in lamports. */
   feeReserveLamports?: number;
   solUsdCeilingPrice?: number;
-  /**
-   * Pay at least this much on-chain when a payment is needed, so later calls
-   * run on surplus credit without a network fee each. Only useful if the live
-   * gateway credits overpayment; 0 (off) until the spike confirms that.
-   */
-  prefundMicro?: number;
   fetchImpl?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
   now?: () => Date;
@@ -106,7 +100,16 @@ export function routingHeaders(r: RoutingRequest | undefined): Record<string, st
 }
 
 export class X402Client {
-  private surplusEstimateMicro = 0;
+  /**
+   * What we believe the wallet's x402 surplus credit is, in micro-units.
+   *
+   * It starts at Infinity, meaning "unknown, so try". A balance spend that
+   * fails moves no money and is refused before anything is charged, so the
+   * worst case of guessing high is one wasted round trip. The worst case of
+   * guessing low is a real Solana fee, which on a small quote is ~99% of what
+   * the call costs. So the unknown case rounds towards trying.
+   */
+  private surplusEstimateMicro = Number.POSITIVE_INFINITY;
   private readonly f: typeof fetch;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly now: () => Date;
@@ -168,12 +171,20 @@ export class X402Client {
         const rec = await update({ status: 'failed', scheme: 'balance', error: err.message, latencyMs: Date.now() - started });
         throw new X402CallFailed(`balance spend failed: ${err.message}`, rec, err);
       }
-      // Our estimate was high. Nothing was spent; fall through to paying on-chain.
-      this.surplusEstimateMicro = 0;
+      // Our estimate was high. Nothing was spent; fall through to paying
+      // on-chain. The refusal is itself information: the balance is below this
+      // cap, so record that rather than throwing the knowledge away.
+      this.surplusEstimateMicro = Math.max(0, rail.amount_microunits - 1);
     }
 
     // 2b. On-chain. Reserve budget first; no reservation, no payment.
-    const amount = Math.max(rail.amount_microunits, this.o.prefundMicro ?? 0);
+    //
+    // The amount is the quoted cap, always. Paying above it was tried once, on
+    // 2026-09-25, on the theory that the excess became surplus credit: it does
+    // not. The gateway charges the cap, keeps the difference and credits
+    // nothing, so $0.039990 bought ten micro-units of inference. Surplus credit
+    // comes only from the unused part of a cap we were actually quoted.
+    const amount = rail.amount_microunits;
     const feeReserveMicro = lamportsToMicroCeil(this.o.feeReserveLamports ?? 10_000, this.o.solUsdCeilingPrice ?? 400);
     const { decision, entryId } = await this.o.ledger.reserve({ phase: req.phase, kind: 'x402_payment', amountMicro: amount + feeReserveMicro, callId: record.id });
     if (!decision.ok || !entryId) {
@@ -192,6 +203,14 @@ export class X402Client {
       // Leave the reservation counted: the money may be gone.
       const rec = await update({ status: 'payment_unknown', error: pay.error, latencyMs: Date.now() - started });
       throw new X402CallFailed(`payment outcome unknown: ${pay.error}`, rec);
+    }
+    // The signer is the thing that actually moves money, so check what it did
+    // rather than trusting what it was asked to do. Anything above the cap is
+    // money we cannot get back, and it must be visible in the ledger.
+    if (pay.amount_micro > rail.amount_microunits) {
+      await this.o.ledger.settle(entryId, { amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature });
+      const rec = await update({ status: 'paid', scheme: 'onchain', payerWallet: pay.payer_wallet, payTxSignature: pay.signature, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, error: 'overpaid' });
+      throw new X402CallFailed(`signer paid ${pay.amount_micro} above the quoted cap ${rail.amount_microunits}; the excess is not recoverable`, rec);
     }
     await this.o.ledger.settle(entryId, { amountMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature });
     await update({ status: 'paid', scheme: 'onchain', payerWallet: pay.payer_wallet, payTxSignature: pay.signature, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro });
@@ -227,11 +246,27 @@ export class X402Client {
     });
 
     // Track surplus credit. Prefer the gateway's own balance figure if the receipt carries one.
+    //
+    // The live gateway does not carry one: a settled PAYMENT-RESPONSE reports
+    // max_microunits and charged_microunits and no balance. So we keep our own
+    // running estimate from those two numbers, because the alternative measured
+    // on 2026-09-25 was an agent that paid a $0.002 network fee on every call
+    // while ~16,000 micro-units of its own credit sat unspent.
+    //
+    // The estimate only has to be good enough to decide whether to *try* a
+    // balance spend. Guessing high costs one rejected attempt, which moves no
+    // money and is refused before anything is charged; guessing low costs a real
+    // network fee. So we round towards trying.
     const reportedBalance = numberField(pr, ['balance_microunits', 'balance', 'remaining_balance_microunits']);
-    if (reportedBalance !== null) this.surplusEstimateMicro = reportedBalance;
-    else if (p.scheme === 'balance') this.surplusEstimateMicro = Math.max(0, this.surplusEstimateMicro - p.cap);
-    // With no figure from the gateway we assume on-chain payments credited nothing. Guessing high would only
-    // cost a free rejected balance attempt, but the receipt should not claim credit we cannot see.
+    const chargedMicro = numberField(pr, ['charged_microunits', 'charged']);
+    if (reportedBalance !== null) {
+      this.surplusEstimateMicro = reportedBalance;
+    } else if (p.scheme === 'balance') {
+      this.surplusEstimateMicro = Math.max(0, this.surplusEstimateMicro - (chargedMicro ?? p.cap));
+    } else if (chargedMicro !== null && chargedMicro < p.cap) {
+      // Paid the cap, used less: the remainder is credit we can spend next time.
+      this.surplusEstimateMicro += p.cap - chargedMicro;
+    }
 
     let response: unknown = null;
     try {

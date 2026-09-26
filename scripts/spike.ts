@@ -2,7 +2,7 @@
 //
 //   baseline  one cheap call paid on-chain at exactly the quote cap.
 //             What does PAYMENT-RESPONSE contain? Do X-Pod-* headers come back?
-//   overpay   pay above the cap. Is the excess credited to the wallet's surplus?
+//   (overpay   removed 2026-09-25: the excess is NOT credited and not refunded.)
 //   drawdown  spend surplus credit with a signed proof (no on-chain transaction).
 //   surplus   build credit the documented way: a high max_tokens cap, a short answer.
 //   routing   are X-Pod-* routing headers honoured on the x402 path?
@@ -35,8 +35,8 @@ const ledger = new PgSpendLedger(pool, budgetConfig({ lifetimeCeilingMicro: env.
 const receipts = new PgReceiptStore(pool);
 const signer = new SignerClient(env.SIGNER_URL ?? 'http://127.0.0.1:8787', env.SIGNER_TOKEN ?? '');
 
-const mk = (prefundMicro = 0) =>
-  new X402Client({ baseUrl, payer: signer, ledger, receipts, prefundMicro, solUsdCeilingPrice: Number(env.SIGNER_SOL_USD_CEILING_PRICE ?? 400) });
+const mk = () =>
+  new X402Client({ baseUrl, payer: signer, ledger, receipts, solUsdCeilingPrice: Number(env.SIGNER_SOL_USD_CEILING_PRICE ?? 400) });
 
 const outDir = `data/spike/${new Date().toISOString().replace(/[:.]/g, '-')}`;
 mkdirSync(outDir, { recursive: true });
@@ -71,11 +71,6 @@ const routing = (r: RoutingRequest, content: string): CallRequest => ({ ...cheap
 
 const experiments: Record<string, () => Promise<unknown>> = {
   baseline: () => run('baseline', mk(), cheap('Reply with the single word: ok')),
-  overpay: async () => {
-    const c = mk(20_000); // pay $0.02 against a cap of a few micro-dollars
-    await run('overpay-pay', c, cheap('Reply with the single word: ok'));
-    return run('overpay-drawdown', forceEstimate(c, 1_000_000), cheap('Reply with the single word: yes'));
-  },
   drawdown: () => run('drawdown', forceEstimate(mk(), 1_000_000), cheap('Reply with the single word: again')),
   surplus: async () => {
     // Cap is priced on max_tokens; a one-word answer leaves most of it as credit.

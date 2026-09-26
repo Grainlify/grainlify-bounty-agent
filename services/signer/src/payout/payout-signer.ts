@@ -13,6 +13,12 @@ import type { PayoutRail } from './rail.ts';
 /** Hard ceilings for the hackathon. Config can lower them, never raise them. */
 export const HARD_CAPS: Record<string, { perBountyMaxMinor: bigint; dailyMaxMinor: bigint }> = {
   USDC: { perBountyMaxMinor: 50_000_000n, dailyMaxMinor: 150_000_000n },
+  // ANSEM (The Black Bull, mint 9cRCn9rG...pump, 6 decimals). Sized to the float
+  // rather than to a dollar figure, because the float is the only thing that can
+  // actually pay: it held 10.124557 ANSEM on 2026-09-25. At ~$0.19 a token a $1
+  // bounty is about 5.2 ANSEM, so 6 covers one comfortably and the daily ceiling
+  // is the whole float -- the agent can never promise more ANSEM than exists.
+  ANSEM: { perBountyMaxMinor: 6_000_000n, dailyMaxMinor: 10_000_000n },
 };
 
 export interface PayoutSignerConfig {

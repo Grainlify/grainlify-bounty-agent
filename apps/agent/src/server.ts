@@ -122,6 +122,33 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       // Wallet link from a signed-in Grainlify session. Browser-facing, so the
       // same origin allowlist as /public/*; what authorises it is the two
       // signatures in the body, not the origin.
+      // Reading your own link. Separate route, separate domain, no nonce spend.
+      if (url.pathname === '/link/session/read') {
+        const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
+        const reply = (status: number, body: unknown) => {
+          res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors });
+          res.end(JSON.stringify(body));
+        };
+        if (req.method === 'OPTIONS') {
+          res.writeHead(204, cors);
+          return res.end();
+        }
+        if (req.method !== 'POST') return reply(405, { error: 'method_not_allowed' });
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8')) as Record<string, unknown>;
+        } catch {
+          return reply(400, { error: 'malformed', detail: 'the body must be JSON under 16 KB' });
+        }
+        const r = await d.service.readLinkFromSession({ message: body?.message, countersignature: body?.countersignature });
+        // Whose link was asked for and whether one exists, without putting the
+        // signed material or the address in a log line.
+        note = r.ok ? ` read=${r.wallet ? 'linked' : 'none'} github=${r.githubUserId}` : ` read=refused reason=${r.error}`;
+        return r.ok
+          ? reply(r.status, { linked: r.wallet !== null, wallet: r.wallet, linkedAt: r.linkedAt, githubLogin: r.githubLogin })
+          : reply(r.status, { error: r.error, detail: r.detail });
+      }
+
       if (url.pathname === '/link/session') {
         const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
         const reply = (status: number, body: unknown) => {

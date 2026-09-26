@@ -15,7 +15,7 @@ import { Journal } from '../../../services/signer/src/journal.ts';
 import { MockRail } from '../../../services/signer/src/rails.ts';
 import { createSignerServer } from '../../../services/signer/src/server.ts';
 import { Signer, signerConfig } from '../../../services/signer/src/signer.ts';
-import { BudgetRefused, X402CallFailed, X402Client } from '../src/client.ts';
+import { BudgetRefused, type Payer, X402CallFailed, X402Client } from '../src/client.ts';
 import { X402_PATHS } from '../src/protocol.ts';
 import { InMemoryReceiptStore } from '../src/receipts.ts';
 
@@ -31,7 +31,7 @@ async function listen(s: Server) {
   return `http://127.0.0.1:${(s.address() as AddressInfo).port}`;
 }
 
-async function harness(o: { mock?: MockOptions; signerEnv?: Record<string, string>; agentCeiling?: number; prefundMicro?: number } = {}) {
+async function harness(o: { mock?: MockOptions; signerEnv?: Record<string, string>; agentCeiling?: number; payer?: Payer } = {}) {
   const gw = createMockGateway(o.mock);
   const gatewayUrl = await listen(gw.server);
   const journal = new Journal(join(mkdtempSync(join(tmpdir(), 'e2e-')), 'j.sqlite'), 'mock');
@@ -41,10 +41,9 @@ async function harness(o: { mock?: MockOptions; signerEnv?: Record<string, strin
   const receipts = new InMemoryReceiptStore();
   const client = new X402Client({
     baseUrl: gatewayUrl,
-    payer: new SignerClient(signerUrl, TOKEN),
+    payer: o.payer ?? new SignerClient(signerUrl, TOKEN),
     ledger,
     receipts,
-    prefundMicro: o.prefundMicro,
     sleep: async () => {},
   });
   return { gw, journal, ledger, receipts, client, signer };
@@ -78,9 +77,14 @@ describe('x402 end to end against the mock gateway', () => {
   });
 
   it('draws down surplus credit with a signed proof: no second on-chain payment, no second fee', async () => {
-    const h = await harness({ mock: { overpayPolicy: 'credit' }, prefundMicro: 5_000 });
-    const first = await h.client.call(chat('first'));
-    expect(first.record).toMatchObject({ scheme: 'onchain', paidMicro: 5_000 });
+    const h = await harness();
+    // Credit comes from the unused part of a cap: quote a large max_tokens and
+    // answer briefly. This is the only way credit accrues -- overpaying does
+    // not work, measured against the live gateway on 2026-09-25. The cap has to
+    // stay under the signer's per-call maximum, which is the other guard.
+    const first = await h.client.call(chat('first', 100_000));
+    expect(first.record.scheme).toBe('onchain');
+    expect(first.record.paidMicro).toBe(first.record.quoteCapMicro);
     const spentAfterFirst = (await h.ledger.totals()).lifetimeMicro;
 
     const second = await h.client.call(chat('second'));
@@ -90,13 +94,37 @@ describe('x402 end to end against the mock gateway', () => {
   });
 
   it('falls back to paying on-chain when the gateway says the credit is short', async () => {
-    const h = await harness({ mock: { overpayPolicy: 'forfeit' }, prefundMicro: 5_000 });
+    const h = await harness();
     await h.client.call(chat('first'));
     // The mock's receipt reports the balance; force a stale high estimate to exercise the fallback.
     (h.client as unknown as { surplusEstimateMicro: number }).surplusEstimateMicro = 1_000_000;
     const second = await h.client.call(chat('second'));
     expect(second.record.scheme).toBe('onchain');
     expect(h.journal.all()).toHaveLength(2);
+  });
+
+  it('refuses and records it if the signer ever pays above the quoted cap', async () => {
+    // Nothing in the client can overpay any more, so the danger left is a
+    // signer that pays the wrong amount. The excess is unrecoverable, so it
+    // must fail loudly and still be counted -- the money did leave.
+    const real = new SignerClient('http://127.0.0.1:1', TOKEN); // replaced below
+    let capSeen = 0;
+    const overpayer: Payer = {
+      address: async () => 'HKMMpctYvofRCSF2uGnqfEGWcmMhD8A86xFqgmWTvcq9',
+      balanceProof: (q) => real.balanceProof(q),
+      payQuote: async (rail) => {
+        capSeen = rail.amount_microunits;
+        return { kind: 'paid', payer_wallet: 'HKMMpctYvofRCSF2uGnqfEGWcmMhD8A86xFqgmWTvcq9', signature: 'sig-overpaid', amount_micro: rail.amount_microunits + 20_000, fee_micro: 2_000 };
+      },
+    };
+    const h = await harness({ payer: overpayer });
+    // This test is about the on-chain path, so take credit out of the picture.
+    (h.client as unknown as { surplusEstimateMicro: number }).surplusEstimateMicro = 0;
+    await expect(h.client.call(chat('overpay'))).rejects.toThrow(/above the quoted cap/);
+    // The client asked for exactly the cap; the signer is what went wrong.
+    expect(capSeen).toBeGreaterThan(0);
+    // Counted, not silently dropped: the money is gone either way.
+    expect((await h.ledger.totals()).lifetimeMicro).toBeGreaterThanOrEqual(capSeen + 20_000);
   });
 
   it('hard-stops at the agent ceiling without asking the signer to pay', async () => {
@@ -143,5 +171,34 @@ describe('x402 end to end against the mock gateway', () => {
     const h = await harness();
     const err = await h.client.call({ ...chat('x'), body: { model: 'nope', max_tokens: 5, messages: [] } }).catch((e: unknown) => e);
     expect((err as X402CallFailed).gatewayError).toMatchObject({ status: 503, type: 'no_provider', message: 'no healthy provider for model: nope' });
+  });
+});
+
+describe('credit-first spending', () => {
+  it('spends the credit a previous call left, without being told the balance', async () => {
+    // The live gateway reports charged_microunits but no balance, so the client
+    // has to derive its own estimate or it pays a network fee on every call
+    // while its credit sits unused.
+    // reportBalance:false reproduces the live gateway, which never tells the
+    // client its balance.
+    const h = await harness({ mock: { reportBalance: false } });
+    const first = await h.client.call(chat('build credit', 100_000));
+    expect(first.record.scheme).toBe('onchain');
+    expect(first.record.chargedMicro!).toBeLessThan(first.record.quoteCapMicro!);
+
+    const second = await h.client.call(chat('spend credit'));
+    expect(second.record).toMatchObject({ scheme: 'balance', paidMicro: 0, feeMicro: 0 });
+    // One on-chain payment total: the second call cost no network fee.
+    expect(h.journal.all()).toHaveLength(1);
+  });
+
+  it('still pays on-chain when no credit has accrued', async () => {
+    const h = await harness({ mock: { reportBalance: false } });
+    // A tiny cap leaves nothing over, so there is no credit to spend.
+    const first = await h.client.call(chat('a', 1));
+    const second = await h.client.call(chat('b', 1));
+    expect(first.record.scheme).toBe('onchain');
+    expect(second.record.scheme).toBe('onchain');
+    expect(h.journal.all()).toHaveLength(2);
   });
 });
