@@ -51,12 +51,12 @@ const COLS: [keyof InferenceCallRecord, string][] = [
   ['routingRequested', 'routing_requested'], ['maxTokens', 'max_tokens'], ['requestSha256', 'request_sha256'], ['status', 'status'],
   ['quoteId', 'quote_id'], ['quoteCapMicro', 'quote_cap_micro'], ['quoteExpiresAt', 'quote_expires_at'], ['scheme', 'scheme'],
   ['payerWallet', 'payer_wallet'], ['payTxSignature', 'pay_tx_signature'], ['paidMicro', 'paid_micro'], ['feeMicro', 'fee_micro'],
-  ['chargedMicro', 'charged_micro'], ['paymentResponseRaw', 'payment_response_raw'], ['paymentResponse', 'payment_response'],
+  ['fee_lamports', 'fee_lamports'], ['chargedMicro', 'charged_micro'], ['paymentResponseRaw', 'payment_response_raw'], ['paymentResponse', 'payment_response'],
   ['responseHeaders', 'response_headers'], ['responseSha256', 'response_sha256'], ['usageIn', 'usage_in'], ['usageOut', 'usage_out'],
   ['latencyMs', 'latency_ms'], ['error', 'error'], ['createdAt', 'created_at'],
 ];
 const JSON_COLS = new Set(['links', 'routing_requested', 'payment_response', 'response_headers']);
-const NUM_COLS = new Set(['quote_cap_micro', 'paid_micro', 'fee_micro', 'charged_micro']);
+const NUM_COLS = new Set(['quote_cap_micro', 'paid_micro', 'fee_micro', 'charged_micro', 'fee_lamports']);
 
 function toRow(rec: Partial<InferenceCallRecord>) {
   const cols: string[] = [];

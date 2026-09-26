@@ -32,7 +32,7 @@ export interface Payer {
 }
 
 export type PayOutcome =
-  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_micro: number }
+  | { kind: 'paid'; payer_wallet: string; signature: string; amount_micro: number; fee_micro: number; fee_lamports: number }
   /** The signer refused before sending anything. Certain: no money moved. */
   | { kind: 'refused'; error: string }
   /** Something went wrong after the transaction may have been sent. Money may have moved. */
