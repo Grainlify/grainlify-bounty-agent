@@ -12,13 +12,15 @@
 
 export interface Setting {
   key: string;
-  type: 'int' | 'float' | 'bool';
+  type: 'int' | 'float' | 'bool' | 'enum';
   default: string;
   section: string;
   description: string;
   /** Rejected outside this range. Absent means any value of the type. */
   min?: number;
   max?: number;
+  /** For 'enum': the only values accepted. */
+  values?: string[];
 }
 
 export const DRAW_SETTINGS: Setting[] = [
@@ -55,6 +57,14 @@ export const DRAW_SETTINGS: Setting[] = [
     description: 'How many times a window may be extended for lack of applicants before the bounty is left alone for a human to look at.',
     min: 0,
     max: 20,
+  },
+  {
+    key: 'applicant_count_visibility',
+    type: 'enum',
+    default: 'bucketed',
+    section: 'Window',
+    description: 'How much of the applicant pool contributors see while a window is open. Exact counts are always released once it closes.',
+    values: ['hidden', 'bucketed', 'exact'],
   },
   {
     key: 'assignment_stale_hours',
@@ -152,10 +162,28 @@ export function validate(key: string, value: string): string | null {
   if (s.type === 'bool') {
     return value === 'true' || value === 'false' ? null : 'must be true or false';
   }
+  if (s.type === 'enum') {
+    return s.values?.includes(value) ? null : `must be one of ${s.values?.join(', ')}`;
+  }
   const n = Number(value);
   if (!Number.isFinite(n)) return 'must be a number';
   if (s.type === 'int' && !Number.isInteger(n)) return 'must be a whole number';
   if (s.min !== undefined && n < s.min) return `must be at least ${s.min}`;
   if (s.max !== undefined && n > s.max) return `must be at most ${s.max}`;
   return null;
+}
+
+/**
+ * A pool size as a coarse band.
+ *
+ * Three bands and no more, ported from Grainlify-Backend's applicantBucket:
+ * "more bands means more precision, which is the thing bucketing exists to
+ * remove". An exact live count turns the draw into something to time - apply
+ * late, when the odds look best - which rewards refreshing the page rather
+ * than doing the work.
+ */
+export function applicantBucket(n: number): 'none' | 'few' | 'many' {
+  if (n === 0) return 'none';
+  if (n < 5) return 'few';
+  return 'many';
 }

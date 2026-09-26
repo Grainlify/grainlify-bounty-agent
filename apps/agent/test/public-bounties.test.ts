@@ -6,7 +6,7 @@ import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { freshDatabase } from '../../../packages/db/src/testing.ts';
 import { p2Config } from '../src/config.ts';
-import { PublicApi } from '../src/public.ts';
+import { poolVisibility, PublicApi } from '../src/public.ts';
 
 const dbUrl = process.env.TEST_DATABASE_URL;
 
@@ -68,9 +68,9 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
     expect((await api.bounties(id))[0]).toMatchObject({ assignedTo: null });
   });
 
-  it('never publishes how many people applied', async () => {
-    // A visible pool size makes the draw something to time: apply late, when
-    // the odds look best. The count is admin-only for that reason.
+  it('never publishes who applied, only how many, and coarsely', async () => {
+    // A precise live count makes the draw something to time: apply late, when
+    // the odds look best. Names are never published at all.
     const id = await bounty({ closeAt: new Date(Date.now() + 3600_000).toISOString() });
     for (let i = 0; i < 5; i++) {
       await db.query(
@@ -78,8 +78,61 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
         [id, 900 + i, `person${i}`],
       );
     }
-    const json = JSON.stringify(await api.bounties(id));
-    expect(json).not.toContain('person0');
-    expect(json).not.toMatch(/applicant|poolSize|applications"\s*:/);
+    const [b] = await api.bounties(id);
+    expect(JSON.stringify(b)).not.toContain('person0');
+    expect(b).toMatchObject({ applicantBucket: 'many', applicantCount: null });
+  });
+
+  it('bands the pool while the window is open', async () => {
+    const empty = await bounty({ closeAt: new Date(Date.now() + 3600_000).toISOString() });
+    expect((await api.bounties(empty))[0]).toMatchObject({ applicantBucket: 'none', applicantCount: null });
+
+    const few = await bounty({ closeAt: new Date(Date.now() + 3600_000).toISOString() });
+    for (let i = 0; i < 3; i++) {
+      await db.query(`INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status) VALUES ($1,$2,$3,'applied')`, [few, 700 + i, `p${i}`]);
+    }
+    expect((await api.bounties(few))[0]).toMatchObject({ applicantBucket: 'few', applicantCount: null });
+  });
+
+  it('releases the exact count once the window has closed', async () => {
+    // Settled pool: precision can no longer steer anyone, and by then the
+    // count is what makes a result checkable.
+    const id = await bounty({ closeAt: new Date(Date.now() - 1000).toISOString() });
+    for (let i = 0; i < 3; i++) {
+      await db.query(`INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status) VALUES ($1,$2,$3,'applied')`, [id, 800 + i, `q${i}`]);
+    }
+    expect((await api.bounties(id))[0]).toMatchObject({ applicantCount: 3, applicantBucket: null });
+  });
+
+  it('respects the visibility setting an admin chose', async () => {
+    await db.query(`INSERT INTO bounty_config (key, value, updated_by) VALUES ('applicant_count_visibility','hidden','admin')
+                    ON CONFLICT (key) DO UPDATE SET value = 'hidden'`);
+    const id = await bounty({ closeAt: new Date(Date.now() + 3600_000).toISOString() });
+    await db.query(`INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status) VALUES ($1,1,'x','applied')`, [id]);
+    expect((await api.bounties(id))[0]).toMatchObject({ applicantBucket: null, applicantCount: null });
+    await db.query(`DELETE FROM bounty_config WHERE key = 'applicant_count_visibility'`);
+  });
+});
+
+describe('what to publish about a pool', () => {
+  const open = new Date(Date.now() + 3600_000);
+  const shut = new Date(Date.now() - 1000);
+
+  it('bands three ways and no more', () => {
+    // More bands means more precision, which is what bucketing removes.
+    expect(poolVisibility(0, 'bucketed', open).applicantBucket).toBe('none');
+    expect(poolVisibility(1, 'bucketed', open).applicantBucket).toBe('few');
+    expect(poolVisibility(4, 'bucketed', open).applicantBucket).toBe('few');
+    expect(poolVisibility(5, 'bucketed', open).applicantBucket).toBe('many');
+    expect(poolVisibility(500, 'bucketed', open).applicantBucket).toBe('many');
+  });
+
+  it('a closed window overrides every setting, including hidden', () => {
+    expect(poolVisibility(7, 'hidden', shut)).toMatchObject({ applicantCount: 7 });
+    expect(poolVisibility(7, 'bucketed', shut)).toMatchObject({ applicantCount: 7, applicantBucket: null });
+  });
+
+  it('a bounty with no window at all publishes nothing', () => {
+    expect(poolVisibility(3, 'bucketed', null)).toMatchObject({ applicantBucket: 'few', applicantCount: null });
   });
 });

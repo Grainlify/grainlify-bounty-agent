@@ -12,6 +12,7 @@
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
+import { applicantBucket, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 
 export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
@@ -97,6 +98,20 @@ export interface PublicBounty {
    *  people applied would make the draw something to time. */
   assignedTo: string | null;
   assignmentStaleAt: string | null;
+  /**
+   * How many people are in the pool, as a coarse band while the window is
+   * open: 'none' | 'few' | 'many', or null when the event hides it.
+   *
+   * Coarse on purpose. An exact live count makes the draw something to time,
+   * which rewards refreshing the page rather than doing the work.
+   */
+  applicantBucket: 'none' | 'few' | 'many' | null;
+  /**
+   * The exact pool size, released once the window closes and precision can no
+   * longer steer anyone's choice of where to apply. null while it is open,
+   * unless the setting says otherwise.
+   */
+  applicantCount: number | null;
 }
 
 export interface LedgerEvent {
@@ -111,6 +126,25 @@ export interface LedgerEvent {
 }
 
 const shortSig = (s: string) => `${s.slice(0, 5)}…${s.slice(-4)}`;
+
+/**
+ * What to publish about the pool, given the setting and whether the window
+ * has closed.
+ *
+ * Once a window closes the pool is settled, so exactness can no longer
+ * influence anyone's choice of where to apply - and by then the count is the
+ * thing that makes a result checkable. Before that it is a band, or nothing.
+ */
+export function poolVisibility(
+  count: number,
+  visibility: string,
+  closesAt: Date | string | null,
+): { applicantBucket: 'none' | 'few' | 'many' | null; applicantCount: number | null } {
+  const closed = closesAt !== null && closesAt !== undefined && new Date(closesAt) <= new Date();
+  if (closed || visibility === 'exact') return { applicantBucket: null, applicantCount: count };
+  if (visibility === 'hidden') return { applicantBucket: null, applicantCount: null };
+  return { applicantBucket: applicantBucket(count), applicantCount: null };
+}
 
 export class PublicApi {
   constructor(private readonly db: pg.Pool, private readonly cfg: AgentConfig) {}
@@ -129,12 +163,28 @@ export class PublicApi {
     return Object.values(this.cfg.mints).find((m) => m.mint === mint)?.decimals ?? 6;
   }
 
+  /** Stored draw settings, defaults filled in. Read per call: a visibility
+   *  change should take effect on the next page load, not the next deploy. */
+  private async drawConfig(): Promise<Record<string, string>> {
+    try {
+      const r = await this.db.query<{ key: string; value: string }>(`SELECT key, value FROM bounty_config`);
+      return withDefaults(Object.fromEntries(r.rows.map((x) => [x.key, x.value])));
+    } catch {
+      // A missing settings table must not take the public page down with it.
+      return withDefaults({});
+    }
+  }
+
   async bounties(id?: string): Promise<PublicBounty[]> {
+    const cfg = await this.drawConfig();
+    const visibility = cfg.applicant_count_visibility ?? 'bucketed';
     const r = await this.db.query(
       `SELECT b.id, r.owner, r.name, b.issue_number, b.issue_title, b.amount_minor::text AS amount_minor, b.mint, b.currency, b.network, b.status, b.created_at,
               p.tx_signature, p.updated_at AS paid_at, s.author_login,
               b.is_test, b.waived_eligibility_rules, b.applications_open_at, b.applications_close_at,
-              a.github_login AS assigned_login, a.stale_at AS assignment_stale_at
+              a.github_login AS assigned_login, a.stale_at AS assignment_stale_at,
+              (SELECT count(*) FROM bounty_applications ap
+                WHERE ap.bounty_id = b.id AND ap.status IN ('applied','won','lost'))::int AS applicant_count
          FROM bounties b
          JOIN repos r ON r.id = b.repo_id
          LEFT JOIN payouts p ON p.bounty_id = b.id AND p.status = 'confirmed'
@@ -167,6 +217,7 @@ export class PublicApi {
       applicationState: !b.applications_close_at ? 'none' : new Date(b.applications_close_at) > new Date() ? 'open' : 'closed',
       assignedTo: b.assigned_login ?? null,
       assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
+      ...poolVisibility(Number(b.applicant_count ?? 0), visibility, b.applications_close_at),
     }));
   }
 
