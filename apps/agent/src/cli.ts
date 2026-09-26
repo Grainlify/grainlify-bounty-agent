@@ -2,6 +2,9 @@
 //
 //   repo add <owner/name>                 allowlist a repo the App is installed on
 //   bounty propose <owner/name> <issue>   price an issue (one inference call) and post the bounty
+//   bounty seed <owner/name> <issue> <usd> [--test] [--waive rule] [--title t]
+//                                         create a bounty at a chosen amount, with no
+//                                         inference call and no GitHub comment
 //   approve <payout-id>                   show a payout, confirm, sign with the approver key, submit
 //
 // `approve` talks to the agent over HTTP and signs locally: the approver key
@@ -58,11 +61,41 @@ async function main() {
     if (cmd === 'repo' && sub === 'add' && rest[0]) {
       await service.addRepo(rest[0], true);
       console.log(`allowlisted ${rest[0]}`);
+    } else if (cmd === 'bounty' && sub === 'seed' && rest[0] && rest[1] && rest[2]) {
+      const flag = (name: string) => {
+        const i = rest.indexOf(`--${name}`);
+        return i >= 0 ? (rest[i + 1] ?? '') : undefined;
+      };
+      const usd = Number(rest[2]);
+      if (!Number.isFinite(usd) || usd <= 0) throw new Error(`bad amount ${rest[2]}`);
+      const { draw } = await (await import('./wiring.ts')).wire();
+      const r = await service.seedBounty({
+        repo: rest[0],
+        issueNumber: Number(rest[1]),
+        // Six decimals: USDC and ANSEM both use them. Computed in integers to
+        // keep a cent from arriving as 0.009999999.
+        amountMinor: BigInt(Math.round(usd * 1_000_000)),
+        currency: flag('currency'),
+        createdBy: process.env.MAINTAINER ?? 'maintainer',
+        isTest: rest.includes('--test'),
+        waivedRules: flag('waive') ? [flag('waive')!] : [],
+        title: flag('title'),
+      });
+      const w = await draw.openApplications(r.bountyId);
+      console.log(`seeded ${rest.includes('--test') ? 'TEST ' : ''}bounty ${r.bountyId}`);
+      console.log(`  ${rest[0]} #${rest[1]} — ${r.title}`);
+      console.log(`  applications open until ${w.closesAt}`);
+      if (flag('waive')) console.log(`  waives: ${flag('waive')}`);
     } else if (cmd === 'bounty' && sub === 'propose' && rest[0] && rest[1]) {
       const r = await service.proposeBounty(rest[0], Number(rest[1]), process.env.MAINTAINER ?? 'maintainer', rest[2]);
       console.log(`posted bounty ${r.bountyId}: ${r.amount} minor units; ${r.commentUrl}`);
     } else {
-      console.error('usage: agent repo add <owner/name> | bounty propose <owner/name> <issue> [currency] | approve <payout-id>');
+      console.error(
+        'usage: agent repo add <owner/name>\n' +
+          '     | bounty propose <owner/name> <issue> [currency]\n' +
+          '     | bounty seed <owner/name> <issue> <usd> [--test] [--waive <rule>] [--title <t>] [--currency <c>]\n' +
+          '     | approve <payout-id>',
+      );
       process.exitCode = 2;
     }
   } finally {

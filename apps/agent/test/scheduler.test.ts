@@ -19,11 +19,11 @@ describe('the draw scheduler', () => {
     // Two sweeps overlapping would run the same window twice.
     vi.useFakeTimers();
     let started = 0;
-    let release: (() => void) | null = null;
+    const holder: { release?: () => void } = {};
     const s = startDrawScheduler(
       svc(async () => {
         started++;
-        await new Promise<void>((r) => { release = r; });
+        await new Promise<void>((r) => { holder.release = r; });
         return { drawn: [], extended: [], skipped: [] };
       }),
       1000,
@@ -31,7 +31,7 @@ describe('the draw scheduler', () => {
     );
     await vi.advanceTimersByTimeAsync(3500);
     expect(started).toBe(1);
-    release?.();
+    holder.release?.();
     s.stop();
     vi.useRealTimers();
   });

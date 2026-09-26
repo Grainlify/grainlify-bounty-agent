@@ -220,6 +220,60 @@ export class BountyService {
     };
   }
 
+  /**
+   * Creates a bounty directly, with an amount somebody chose, and opens its
+   * application window. No inference call and no GitHub comment.
+   *
+   * proposeBounty is the normal path and does both: it prices the issue with a
+   * model and announces the bounty on the issue itself. This exists for the
+   * cases where neither is wanted - seeding a known amount, and above all
+   * creating the labelled test bounty that has to exist before real ones do.
+   * Writing a comment on a public issue is not something a seeding command
+   * should do as a side effect.
+   *
+   * Returns the id so the caller can print it; the window is opened by the
+   * draw service, which owns what "open" means.
+   */
+  async seedBounty(input: {
+    repo: string;
+    issueNumber: number;
+    amountMinor: bigint;
+    currency?: string;
+    createdBy: string;
+    isTest?: boolean;
+    waivedRules?: string[];
+    title?: string;
+  }): Promise<{ bountyId: string; title: string }> {
+    const fullName = input.repo;
+    const repo = await this.repo(fullName);
+    if (!repo) throw new Error(`${fullName} is not allowlisted; run: agent repo add ${fullName}`);
+    const currency = input.currency ?? this.d.cfg.defaultCurrency;
+    const mint = this.d.cfg.mints[currency];
+    if (!mint) throw new Error(`no mint configured for ${currency} on ${this.d.cfg.network}`);
+
+    // Read-only: the title is for the page, and reading an issue writes
+    // nothing to it.
+    let title = input.title ?? '';
+    if (!title) {
+      try {
+        title = (await this.d.gh.getIssue(fullName, input.issueNumber)).title;
+      } catch {
+        title = `Issue #${input.issueNumber}`;
+      }
+    }
+
+    const bountyId = randomUUID();
+    await this.d.db.query(
+      `INSERT INTO bounties (id, repo_id, issue_number, issue_title, amount_minor, currency, mint, network, status, pricing, created_by, is_test, waived_eligibility_rules)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'posted','{}'::jsonb,$9,$10,$11)`,
+      [
+        bountyId, repo.id, input.issueNumber, title.slice(0, 300), input.amountMinor.toString(),
+        currency, mint.mint, this.d.cfg.network, input.createdBy, input.isTest === true, input.waivedRules ?? [],
+      ],
+    );
+    return { bountyId, title };
+  }
+
   async readLinkFromSession(input: { message: unknown; countersignature: unknown }): Promise<SessionReadOutcome> {
     if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
     // this.now(), not new Date(): the link path next door already reads the

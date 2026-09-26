@@ -82,6 +82,21 @@ export interface PublicBounty {
   status: string;
   postedAt: string;
   payout: { txSignature: string; txUrl: string; paidAt: string; recipientLogin: string } | null;
+  /** A bounty that exists to exercise the pipeline. Shown as such; never quietly. */
+  isTest: boolean;
+  /** Eligibility rules this bounty waives, named. Public on purpose: a relaxed
+   *  rule that nobody can see is indistinguishable from a rule that does not work. */
+  waivedRules: string[];
+  applicationsOpenAt: string | null;
+  applicationsCloseAt: string | null;
+  /** 'open' while the window is running, 'closed' once it has, 'none' before a
+   *  window was ever opened. The page needs the distinction: a bounty awaiting
+   *  its first draw and one that never opened read the same otherwise. */
+  applicationState: 'none' | 'open' | 'closed';
+  /** Who holds it now, if anyone. The pool is NOT public - knowing how many
+   *  people applied would make the draw something to time. */
+  assignedTo: string | null;
+  assignmentStaleAt: string | null;
 }
 
 export interface LedgerEvent {
@@ -117,11 +132,14 @@ export class PublicApi {
   async bounties(id?: string): Promise<PublicBounty[]> {
     const r = await this.db.query(
       `SELECT b.id, r.owner, r.name, b.issue_number, b.issue_title, b.amount_minor::text AS amount_minor, b.mint, b.currency, b.network, b.status, b.created_at,
-              p.tx_signature, p.updated_at AS paid_at, s.author_login
+              p.tx_signature, p.updated_at AS paid_at, s.author_login,
+              b.is_test, b.waived_eligibility_rules, b.applications_open_at, b.applications_close_at,
+              a.github_login AS assigned_login, a.stale_at AS assignment_stale_at
          FROM bounties b
          JOIN repos r ON r.id = b.repo_id
          LEFT JOIN payouts p ON p.bounty_id = b.id AND p.status = 'confirmed'
          LEFT JOIN submissions s ON s.id = p.submission_id
+         LEFT JOIN bounty_assignments a ON a.bounty_id = b.id AND a.status IN ('active','pr_submitted')
         WHERE b.status IN ('posted','in_review','payable','paid') ${id ? 'AND b.id = $1' : ''}
         ORDER BY b.created_at DESC
         LIMIT 200`,
@@ -142,6 +160,13 @@ export class PublicApi {
       payout: b.tx_signature
         ? { txSignature: b.tx_signature, txUrl: explorerTx(b.network, b.tx_signature), paidAt: new Date(b.paid_at).toISOString(), recipientLogin: b.author_login }
         : null,
+      isTest: b.is_test === true,
+      waivedRules: (b.waived_eligibility_rules ?? []) as string[],
+      applicationsOpenAt: b.applications_open_at ? new Date(b.applications_open_at).toISOString() : null,
+      applicationsCloseAt: b.applications_close_at ? new Date(b.applications_close_at).toISOString() : null,
+      applicationState: !b.applications_close_at ? 'none' : new Date(b.applications_close_at) > new Date() ? 'open' : 'closed',
+      assignedTo: b.assigned_login ?? null,
+      assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
     }));
   }
 
