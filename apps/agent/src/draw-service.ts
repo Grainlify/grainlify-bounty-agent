@@ -289,6 +289,47 @@ export class DrawService {
     };
   }
 
+  /**
+   * Every application this one contributor has, across all bounties.
+   *
+   * The page needs it because "have I applied" was answerable only from React
+   * state, which does not survive a re-render or a reload: the list swapped
+   * to a loading skeleton after applying, the row unmounted, and the Apply
+   * button came back. The person clicked again and learned they had already
+   * applied from the refusal. Client state is the wrong place for a fact the
+   * server owns.
+   *
+   * Keyed by bounty id so the page can render each row from it directly.
+   */
+  async applicationsForUser(githubUserId: number) {
+    const r = await this.d.db.query<{
+      bounty_id: string; status: string; gate_failure_reason: string | null; created_at: Date;
+    }>(
+      `SELECT bounty_id, status, gate_failure_reason, created_at
+         FROM bounty_applications WHERE github_user_id = $1`,
+      [githubUserId],
+    );
+    const out: Record<string, { status: string; gateFailureReason: string | null; appliedAt: string }> = {};
+    for (const x of r.rows) {
+      out[x.bounty_id] = {
+        status: x.status,
+        gateFailureReason: x.gate_failure_reason,
+        appliedAt: new Date(x.created_at).toISOString(),
+      };
+    }
+    return out;
+  }
+
+  /** Bounties this contributor currently holds, so the page can say so. */
+  async assignmentsForUser(githubUserId: number) {
+    const r = await this.d.db.query<{ bounty_id: string; status: string; stale_at: Date }>(
+      `SELECT bounty_id, status, stale_at FROM bounty_assignments
+        WHERE github_user_id = $1 AND status IN ('active','pr_submitted')`,
+      [githubUserId],
+    );
+    return Object.fromEntries(r.rows.map((x) => [x.bounty_id, { status: x.status, staleAt: new Date(x.stale_at).toISOString() }]));
+  }
+
   // --------------------------------------------------------------- the draw
 
   /** History that feeds the weights, for every applicant in one query. */

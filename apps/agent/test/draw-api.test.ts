@@ -203,4 +203,67 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
     const r = await fetch(`${bare}/bounties/apply`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
     expect(r.status).toBe(503);
   });
+    // Client state cannot answer this: it does not survive a reload, which is
+    // how someone ended up clicking Apply twice to learn they had applied once.
+    it('answers from the server, keyed by bounty', async () => {
+      const b = await newBounty();
+      await openWindow(b);
+      await person(90, 'asker');
+      await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'asker', id: 90, subject: b }));
+
+      const r = await post('/bounties/mine', signedBody({ kind: 'apply', action: 'my_state', login: 'asker', id: 90, subject: '' }));
+      expect(r.status).toBe(200);
+      expect((r.body.applications as Record<string, { status: string }>)[b]).toMatchObject({ status: 'applied' });
+    });
+
+    it('answers the same twice in a row: a read does not spend the nonce', async () => {
+      // Spending one would mean a page that reloads twice in a second refuses
+      // the second time, and there is nothing to replay - the answer is fixed.
+      const b = await newBounty();
+      await openWindow(b);
+      await person(91, 'twice');
+      const body = signedBody({ kind: 'apply', action: 'my_state', login: 'twice', id: 91, subject: '' });
+      expect((await post('/bounties/mine', body)).status).toBe(200);
+      expect((await post('/bounties/mine', body)).status).toBe(200);
+    });
+
+    it('shows one person only', async () => {
+      const b = await newBounty();
+      await openWindow(b);
+      await person(92, 'mine-only');
+      await person(93, 'other');
+      await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'other', id: 93, subject: b }));
+
+      const r = await post('/bounties/mine', signedBody({ kind: 'apply', action: 'my_state', login: 'mine-only', id: 92, subject: '' }));
+      expect(r.body.applications).toEqual({});
+    });
+
+    it('carries the refusal reason, so the page can say which rule', async () => {
+      const b = await newBounty();
+      await openWindow(b);
+      gh.users.set('nowallet', { id: 94, login: 'nowallet', type: 'User', createdAt: new Date(now().getTime() - 400 * 86_400_000) });
+      await db.query(`INSERT INTO contributors (github_user_id, login) VALUES (94,'nowallet') ON CONFLICT DO NOTHING`);
+      await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'nowallet', id: 94, subject: b }));
+
+      const r = await post('/bounties/mine', signedBody({ kind: 'apply', action: 'my_state', login: 'nowallet', id: 94, subject: '' }));
+      expect((r.body.applications as Record<string, { gateFailureReason: string }>)[b]).toMatchObject({ gateFailureReason: 'no_linked_wallet' });
+    });
+
+    it('reports what the viewer holds', async () => {
+      const b = await newBounty();
+      await openWindow(b);
+      await person(95, 'holder');
+      await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'holder', id: 95, subject: b }));
+      await post('/admin/draw', signedBody({ kind: 'admin', action: 'run_draw', login: 'admin', id: 1, subject: b }));
+
+      const r = await post('/bounties/mine', signedBody({ kind: 'apply', action: 'my_state', login: 'holder', id: 95, subject: '' }));
+      expect((r.body.assignments as Record<string, { status: string }>)[b]).toMatchObject({ status: 'active' });
+      expect((r.body.applications as Record<string, { status: string }>)[b]).toMatchObject({ status: 'won' });
+    });
+
+    it('an admin message cannot read a contributor\'s state', async () => {
+      const r = await post('/bounties/mine', signedBody({ kind: 'admin', action: 'my_state', login: 'admin', id: 1, subject: '' }));
+      expect(r.status).toBe(400);
+      expect(r.body).toMatchObject({ error: 'wrong_domain' });
+    });
 });

@@ -251,8 +251,9 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       // an admin action is Grainlify's judgement, made before it signs. This
       // service checks the first and trusts the second, and the admin domain
       // is what keeps a contributor's apply message from reaching either.
-      if (req.method === 'POST' && (url.pathname === '/bounties/apply' || url.pathname === '/admin/draw')) {
+      if (req.method === 'POST' && (url.pathname === '/bounties/apply' || url.pathname === '/bounties/mine' || url.pathname === '/admin/draw')) {
         const isAdmin = url.pathname === '/admin/draw';
+        const isRead = url.pathname === '/bounties/mine';
         const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
         const reply = (status: number, body: unknown) => {
           res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors });
@@ -282,13 +283,29 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         // One use per message, whoever replays it. Shared with the wallet
         // link's nonce table: a nonce is a nonce, and two tables would mean
         // two places to get the uniqueness wrong.
-        const spent = await d.db.query(
-          `INSERT INTO link_nonces (nonce, github_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING nonce`,
-          [f.nonce, f.githubUserId],
-        );
-        if (!spent.rowCount) {
-          note = ' draw=refused reason=nonce_used';
-          return reply(409, { error: 'nonce_used', detail: 'that request was already used; try again' });
+        //
+        // Reads are exempt, as the wallet read is. Spending a nonce to answer
+        // "what have I applied for" would mean a page that reloads twice in
+        // the same second refuses to tell you the second time, and there is
+        // nothing to replay: the answer is the same however often it is asked.
+        if (!isRead) {
+          const spent = await d.db.query(
+            `INSERT INTO link_nonces (nonce, github_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING nonce`,
+            [f.nonce, f.githubUserId],
+          );
+          if (!spent.rowCount) {
+            note = ' draw=refused reason=nonce_used';
+            return reply(409, { error: 'nonce_used', detail: 'that request was already used; try again' });
+          }
+        }
+
+        if (isRead) {
+          const [applications, assignments] = await Promise.all([
+            d.draw.applicationsForUser(f.githubUserId),
+            d.draw.assignmentsForUser(f.githubUserId),
+          ]);
+          note = ` mine=${Object.keys(applications).length} github=${f.githubUserId}`;
+          return reply(200, { githubLogin: f.login, applications, assignments });
         }
 
         if (!isAdmin) {
