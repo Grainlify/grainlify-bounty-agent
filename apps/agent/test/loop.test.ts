@@ -298,9 +298,13 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     expect((await fetch(`${agentUrl}/public/bounties/00000000-0000-4000-8000-000000000000`)).status).toBe(404);
   });
 
-  it('gives CORS only to allowed origins, and refuses writes', async () => {
-    const evil = await fetch(`${agentUrl}/public/status`, { headers: { origin: 'https://evil.example' } });
-    expect(evil.headers.get('access-control-allow-origin')).toBeNull();
+  it('answers any origin readably, and still refuses writes', async () => {
+    // Origin is not an authorisation boundary here: /public/* is public, and
+    // the write routes are gated by signatures. What CORS decides is whether a
+    // browser may READ a reply, and withholding it hid correct replies from
+    // extensions that rewrite Origin.
+    const other = await fetch(`${agentUrl}/public/status`, { headers: { origin: 'https://evil.example' } });
+    expect(other.headers.get('access-control-allow-origin')).toBe('*');
     const pre = await fetch(`${agentUrl}/public/status`, { method: 'OPTIONS', headers: { origin: 'https://grainlify.com' } });
     expect(pre.status).toBe(204);
     expect(pre.headers.get('access-control-allow-methods')).toBe('GET, OPTIONS');

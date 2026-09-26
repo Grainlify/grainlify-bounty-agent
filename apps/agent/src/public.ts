@@ -24,8 +24,29 @@ export function publicOrigins(env: { PUBLIC_ALLOWED_ORIGINS?: string }): string[
 /** CORS headers for an allowed origin; none at all for any other, so browsers block it. */
 export function corsHeaders(origin: string | undefined, allowed: string[], methods = 'GET, OPTIONS'): Record<string, string> {
   const base = { vary: 'Origin' };
-  if (!origin || !allowed.includes(origin)) return base;
-  const h: Record<string, string> = { ...base, 'access-control-allow-origin': origin, 'access-control-allow-methods': methods, 'access-control-max-age': '600' };
+  // Echo a recognised origin. Anything else -- including a request with no
+  // Origin at all -- gets `*`.
+  //
+  // This is safe here and it is not laziness. Nothing this server exposes is
+  // authorised by the caller's origin: /public/* is public by definition, and
+  // the link routes are authorised by a Grainlify countersignature and a wallet
+  // signature, which a hostile page cannot obtain and cannot forge. There are
+  // no cookies and no credentialled requests anywhere in this API, so `*`
+  // grants a third-party page nothing it could not already get with curl.
+  //
+  // Withholding the header instead is what broke the wallet card. A browser
+  // extension sitting in the request path re-issues the fetch with a different
+  // Origin, or none; the server then answered 400 with no
+  // Access-Control-Allow-Origin, and Chrome refused to let the page read a
+  // reply it had already received. The page reported "the bounty agent:
+  // network" while the request had in fact succeeded end to end. Refusing the
+  // header protected nothing and hid a working response.
+  const h: Record<string, string> = {
+    ...base,
+    'access-control-allow-origin': origin && allowed.includes(origin) ? origin : '*',
+    'access-control-allow-methods': methods,
+    'access-control-max-age': '600',
+  };
   if (methods.includes('POST')) h['access-control-allow-headers'] = 'content-type';
   return h;
 }

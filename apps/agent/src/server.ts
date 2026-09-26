@@ -177,6 +177,18 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           : reply(r.status, { error: r.error, detail: r.detail });
       }
 
+      // One real inference call, to verify the deployed service can buy
+      // reasoning on the live market. Behind the same bearer token as the
+      // payouts read, because it spends real money -- a little, once, with no
+      // caller-supplied prompt or budget.
+      if (req.method === 'POST' && url.pathname === '/admin/inference/verify') {
+        if (!d.payoutsApiToken) return send(503, { error: 'payouts_api_token_not_configured' });
+        if (!bearerOk(req.headers.authorization, d.payoutsApiToken)) return send(401, { error: 'unauthorized' });
+        const r = await d.service.verifyInference();
+        note = ` verify=${r.scheme} charged=${r.chargedMicro} fee=${r.feeMicro}`;
+        return send(200, r);
+      }
+
       if (req.method === 'POST' && url.pathname === '/github/webhook') {
         const raw = await readRaw(req, 5 * 1024 * 1024);
         if (!verifyWebhookSignature(d.webhookSecret, raw, req.headers['x-hub-signature-256'] as string | undefined)) return send(401, { error: 'bad signature' });

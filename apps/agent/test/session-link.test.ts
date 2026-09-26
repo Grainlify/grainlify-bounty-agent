@@ -126,8 +126,11 @@ describe.skipIf(!dbUrl)('wallet link from a Grainlify session (HTTP + Postgres)'
     expect(pre.headers.get('access-control-allow-origin')).toBe(ORIGIN);
     expect(pre.headers.get('access-control-allow-methods')).toBe('POST, OPTIONS');
     expect(pre.headers.get('access-control-allow-headers')).toBe('content-type');
-    const evil = await fetch(`${url}/link/session`, { method: 'OPTIONS', headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' } });
-    expect(evil.headers.get('access-control-allow-origin')).toBeNull();
+    // An unrecognised origin gets a readable answer, not silence: it is still
+    // refused by the signature checks, and withholding the header only ever
+    // hid working replies from browser extensions that rewrite Origin.
+    const other = await fetch(`${url}/link/session`, { method: 'OPTIONS', headers: { origin: 'https://evil.example', 'access-control-request-method': 'POST' } });
+    expect(other.headers.get('access-control-allow-origin')).toBe('*');
     expect((await fetch(`${url}/link/session`)).status).toBe(405);
     // The read-only public API is unchanged: still GET only.
     const pub = await fetch(`${url}/public/status`, { method: 'OPTIONS', headers: { origin: ORIGIN } });

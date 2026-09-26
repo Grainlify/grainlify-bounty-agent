@@ -189,6 +189,37 @@ export class BountyService {
    * replaying it tells you what you already knew about your own account. The
    * link path burns its nonce because a replay THERE would be a second link.
    */
+  /**
+   * One real inference call, to prove the deployed service can actually buy
+   * reasoning on the live market.
+   *
+   * Deliberately tiny and fixed: there is no caller-supplied prompt, model or
+   * token budget, so this cannot become a way to spend the project's ceiling
+   * through the API. It goes through the same governor, signer and ledger as
+   * any other call, so what it proves is the real path, not a special one.
+   */
+  async verifyInference(): Promise<{ scheme: string | null; chargedMicro: number | null; paidMicro: number | null; feeMicro: number | null; quoteId: string | null; txSignature: string | null; provider: string | null; model: string; callId: string }> {
+    const { record } = await this.d.x402.call({
+      purpose: 'crosscheck',
+      phase: 'P2P3',
+      path: X402_PATHS.chat,
+      body: { model: 'gpt-oss-120b', max_tokens: 24, messages: [{ role: 'user', content: 'Reply with the single word: ok' }] },
+      links: {},
+    });
+    const headers = (record.responseHeaders ?? {}) as Record<string, string>;
+    return {
+      scheme: record.scheme ?? null,
+      chargedMicro: record.chargedMicro ?? null,
+      paidMicro: record.paidMicro ?? null,
+      feeMicro: record.feeMicro ?? null,
+      quoteId: record.quoteId ?? null,
+      txSignature: record.payTxSignature ?? null,
+      provider: headers['x-pod-provider-id'] ?? null,
+      model: record.model,
+      callId: record.id,
+    };
+  }
+
   async readLinkFromSession(input: { message: unknown; countersignature: unknown }): Promise<SessionReadOutcome> {
     if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
     const v = verifySessionRead(input, this.d.linkCountersignKey, new Date());
