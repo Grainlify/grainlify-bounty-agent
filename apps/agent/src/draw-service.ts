@@ -59,6 +59,10 @@ export interface DrawOutcome {
   winner: { githubLogin: string; githubUserId: number; tickets: number } | null;
   firstComeFallback: boolean;
   noWinnerReason: string | null;
+  /** Drawn from newcomers only (§3.8). */
+  reservedForNewcomers: boolean;
+  /** Reserved, but nobody eligible applied, so the pool opened up. */
+  reservationFellBack: boolean;
   assignmentId: string | null;
   staleAt: string | null;
 }
@@ -426,8 +430,12 @@ export class DrawService {
     const cfg = await this.config();
     const now = this.d.now();
 
-    const b = await this.d.db.query<{ id: string; status: string }>(`SELECT id, status FROM bounties WHERE id = $1`, [bountyId]);
+    const b = await this.d.db.query<{ id: string; status: string; reserved_for_newcomers: boolean }>(
+      `SELECT id, status, reserved_for_newcomers FROM bounties WHERE id = $1`,
+      [bountyId],
+    );
     if (!b.rows[0]) return { error: 'no_such_bounty', detail: 'that bounty does not exist' };
+    const reserved = b.rows[0].reserved_for_newcomers === true;
 
     if (!simulate) {
       const live = await this.d.db.query(
@@ -445,7 +453,25 @@ export class DrawService {
       [bountyId],
     );
     const history = await this.historyFor(a.rows.map((x) => Number(x.github_user_id)));
-    const applicants: DrawApplicant[] = a.rows.map((x) => {
+
+    // §3.8. A newcomer is someone with no COMPLETED bounty, which is the
+    // spec's newcomer_definition; having applied, or even held one and
+    // released it, does not use the reservation up.
+    let rows = a.rows;
+    let reservationFellBack = false;
+    if (reserved) {
+      const newcomers = rows.filter((x) => (history.get(Number(x.github_user_id))?.completions ?? 0) === 0);
+      if (newcomers.length > 0) {
+        rows = newcomers;
+      } else if (boolOf(cfg.reservation_fallback_to_open_pool, true)) {
+        // An unassignable bounty helps nobody, least of all a newcomer.
+        reservationFellBack = true;
+      } else {
+        return { error: 'no_newcomers', detail: 'this bounty is reserved for newcomers and none applied' };
+      }
+    }
+
+    const applicants: DrawApplicant[] = rows.map((x) => {
       const h = history.get(Number(x.github_user_id))!;
       return {
         githubUserId: Number(x.github_user_id),
@@ -516,6 +542,8 @@ export class DrawService {
         : null,
       firstComeFallback: result.firstComeFallback,
       noWinnerReason: result.noWinnerReason,
+      reservedForNewcomers: reserved,
+      reservationFellBack,
       assignmentId,
       staleAt,
     };

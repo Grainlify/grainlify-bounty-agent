@@ -76,6 +76,14 @@ export const DRAW_SETTINGS: Setting[] = [
     max: 2160,
   },
   {
+    key: 'reservation_fallback_to_open_pool',
+    type: 'bool',
+    default: 'true',
+    section: 'Newcomer reservation',
+    description:
+      'If a reserved bounty attracts no newcomers, draw from everyone rather than leaving it unassigned. An unassignable bounty helps nobody, least of all a newcomer.',
+  },
+  {
     key: 'block_org_members',
     type: 'bool',
     default: 'true',

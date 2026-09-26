@@ -2,7 +2,7 @@
 //
 //   repo add <owner/name>                 allowlist a repo the App is installed on
 //   bounty propose <owner/name> <issue>   price an issue (one inference call) and post the bounty
-//   bounty seed <owner/name> <issue> <usd> [--test] [--waive rule] [--title t]
+//   bounty seed <owner/name> <issue> <usd> [--test] [--newcomers] [--waive rule] [--title t]
 //                                         create a bounty at a chosen amount, with no
 //                                         inference call and no GitHub comment
 //   approve <payout-id>                   show a payout, confirm, sign with the approver key, submit
@@ -79,6 +79,7 @@ async function main() {
         createdBy: process.env.MAINTAINER ?? 'maintainer',
         isTest: rest.includes('--test'),
         waivedRules: flag('waive') ? [flag('waive')!] : [],
+        reservedForNewcomers: rest.includes('--newcomers'),
         title: flag('title'),
       });
       const w = await draw.openApplications(r.bountyId);
@@ -86,6 +87,7 @@ async function main() {
       console.log(`  ${rest[0]} #${rest[1]} — ${r.title}`);
       console.log(`  applications open until ${w.closesAt}`);
       if (flag('waive')) console.log(`  waives: ${flag('waive')}`);
+      if (rest.includes('--newcomers')) console.log('  reserved for newcomers (nobody with a completed bounty can win it)');
     } else if (cmd === 'bounty' && sub === 'propose' && rest[0] && rest[1]) {
       const r = await service.proposeBounty(rest[0], Number(rest[1]), process.env.MAINTAINER ?? 'maintainer', rest[2]);
       console.log(`posted bounty ${r.bountyId}: ${r.amount} minor units; ${r.commentUrl}`);
@@ -93,7 +95,7 @@ async function main() {
       console.error(
         'usage: agent repo add <owner/name>\n' +
           '     | bounty propose <owner/name> <issue> [currency]\n' +
-          '     | bounty seed <owner/name> <issue> <usd> [--test] [--waive <rule>] [--title <t>] [--currency <c>]\n' +
+          '     | bounty seed <owner/name> <issue> <usd> [--test] [--newcomers] [--waive <rule>] [--title <t>] [--currency <c>]\n' +
           '     | approve <payout-id>',
       );
       process.exitCode = 2;

@@ -182,7 +182,7 @@ export class PublicApi {
     const r = await this.db.query(
       `SELECT b.id, r.owner, r.name, b.issue_number, b.issue_title, b.amount_minor::text AS amount_minor, b.mint, b.currency, b.network, b.status, b.created_at,
               p.tx_signature, p.updated_at AS paid_at, s.author_login,
-              b.is_test, b.waived_eligibility_rules, b.applications_open_at, b.applications_close_at,
+              b.is_test, b.waived_eligibility_rules, b.reserved_for_newcomers, b.applications_open_at, b.applications_close_at,
               a.github_login AS assigned_login, a.stale_at AS assignment_stale_at,
               (SELECT count(*) FROM bounty_applications ap
                 WHERE ap.bounty_id = b.id AND ap.status IN ('applied','won','lost'))::int AS applicant_count
@@ -212,6 +212,7 @@ export class PublicApi {
         ? { txSignature: b.tx_signature, txUrl: explorerTx(b.network, b.tx_signature), paidAt: new Date(b.paid_at).toISOString(), recipientLogin: b.author_login }
         : null,
       isTest: b.is_test === true,
+      reservedForNewcomers: b.reserved_for_newcomers === true,
       waivedRules: (b.waived_eligibility_rules ?? []) as string[],
       applicationsOpenAt: b.applications_open_at ? new Date(b.applications_open_at).toISOString() : null,
       applicationsCloseAt: b.applications_close_at ? new Date(b.applications_close_at).toISOString() : null,

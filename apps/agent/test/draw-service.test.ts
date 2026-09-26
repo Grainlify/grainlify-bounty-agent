@@ -16,14 +16,24 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
   let now = new Date('2026-09-27T10:00:00Z');
   let repoId: number;
 
-  const newBounty = async (over: { status?: string; waived?: string[]; isTest?: boolean } = {}) => {
+  const newBounty = async (over: { status?: string; waived?: string[]; isTest?: boolean; reserved?: boolean } = {}) => {
     const id = randomUUID();
     await db.query(
-      `INSERT INTO bounties (id, repo_id, issue_number, amount_minor, currency, mint, network, status, created_by, is_test, waived_eligibility_rules)
-       VALUES ($1,$2,$3,1000000,'USDC','mint','solana-mainnet',$4,'test',$5,$6)`,
-      [id, repoId, Math.floor(Math.random() * 100000), over.status ?? 'posted', over.isTest ?? false, over.waived ?? []],
+      `INSERT INTO bounties (id, repo_id, issue_number, amount_minor, currency, mint, network, status, created_by, is_test, waived_eligibility_rules, reserved_for_newcomers)
+       VALUES ($1,$2,$3,1000000,'USDC','mint','solana-mainnet',$4,'test',$5,$6,$7)`,
+      [id, repoId, Math.floor(Math.random() * 100000), over.status ?? 'posted', over.isTest ?? false, over.waived ?? [], over.reserved ?? false],
     );
     return id;
+  };
+
+  /** Somebody who has finished a bounty before, i.e. not a newcomer. */
+  const withCompletion = async (id: number, login: string) => {
+    const done = await newBounty();
+    await person(id, login);
+    await db.query(
+      `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at) VALUES ($1,$2,$3,'completed', now())`,
+      [done, id, login],
+    );
   };
 
   const person = async (id: number, login: string, opts: { wallet?: boolean; ageDays?: number; perm?: string } = {}) => {
@@ -307,6 +317,78 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
     expect(vet.weights.prior_completion).toBe(1.5);
     expect(vet.weights.first_ever_application).toBeUndefined();
     expect(newbie.weights.first_ever_application).toBe(1.5);
+  });
+
+  // ------------------------------------------------- newcomer reservation
+
+  it('a reserved bounty is won by a newcomer even when veterans applied', async () => {
+    const b = await newBounty({ reserved: true });
+    await svc.openApplications(b);
+    await withCompletion(1100, 'veteran-a');
+    await withCompletion(1101, 'veteran-b');
+    await svc.apply({ bountyId: b, githubUserId: 1100, githubLogin: 'veteran-a' });
+    await svc.apply({ bountyId: b, githubUserId: 1101, githubLogin: 'veteran-b' });
+    const newbie = await person(1102, 'newbie');
+    await svc.apply({ bountyId: b, githubUserId: newbie.id, githubLogin: newbie.login });
+
+    const d = (await svc.runDrawFor(b, { triggeredBy: 'admin' })) as {
+      winner: { githubLogin: string }; poolSize: number; reservedForNewcomers: boolean; reservationFellBack: boolean;
+    };
+    expect(d.reservedForNewcomers).toBe(true);
+    expect(d.reservationFellBack).toBe(false);
+    // The two veterans are not in the pool at all, not merely outweighed.
+    expect(d.poolSize).toBe(1);
+    expect(d.winner.githubLogin).toBe('newbie');
+  });
+
+  it('a newcomer is someone with no COMPLETED bounty, not someone who never applied', async () => {
+    // Having applied, or held one and released it, does not use up the
+    // reservation - only finishing one does.
+    const b = await newBounty({ reserved: true });
+    await svc.openApplications(b);
+    const released = await newBounty();
+    const p = await person(1110, 'released-once');
+    await db.query(
+      `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at) VALUES ($1,1110,'released-once','released_stale', now())`,
+      [released],
+    );
+    await svc.apply({ bountyId: b, githubUserId: p.id, githubLogin: p.login });
+    const d = (await svc.runDrawFor(b, { triggeredBy: 'admin' })) as { winner: { githubLogin: string } | null };
+    expect(d.winner?.githubLogin).toBe('released-once');
+  });
+
+  it('falls back to everyone when no newcomer applied, rather than leaving it unassignable', async () => {
+    const b = await newBounty({ reserved: true });
+    await svc.openApplications(b);
+    await withCompletion(1120, 'only-veteran');
+    await svc.apply({ bountyId: b, githubUserId: 1120, githubLogin: 'only-veteran' });
+
+    const d = (await svc.runDrawFor(b, { triggeredBy: 'admin' })) as {
+      winner: { githubLogin: string } | null; reservationFellBack: boolean;
+    };
+    expect(d.reservationFellBack).toBe(true);
+    expect(d.winner?.githubLogin).toBe('only-veteran');
+  });
+
+  it('can be told to leave it unassigned instead of falling back', async () => {
+    await svc.setSetting('reservation_fallback_to_open_pool', 'false', 'admin');
+    const b = await newBounty({ reserved: true });
+    await svc.openApplications(b);
+    await withCompletion(1130, 'veteran-only');
+    await svc.apply({ bountyId: b, githubUserId: 1130, githubLogin: 'veteran-only' });
+    expect(await svc.runDrawFor(b, { triggeredBy: 'admin' })).toMatchObject({ error: 'no_newcomers' });
+  });
+
+  it('an unreserved bounty draws from everyone', async () => {
+    const b = await newBounty({ reserved: false });
+    await svc.openApplications(b);
+    await withCompletion(1140, 'vet');
+    await svc.apply({ bountyId: b, githubUserId: 1140, githubLogin: 'vet' });
+    const p = await person(1141, 'new');
+    await svc.apply({ bountyId: b, githubUserId: p.id, githubLogin: p.login });
+    const d = (await svc.runDrawFor(b, { triggeredBy: 'admin', simulate: true })) as { poolSize: number; reservedForNewcomers: boolean };
+    expect(d.poolSize).toBe(2);
+    expect(d.reservedForNewcomers).toBe(false);
   });
 
   // --------------------------------------------------------- the scheduler

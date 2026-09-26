@@ -243,6 +243,9 @@ export class BountyService {
     isTest?: boolean;
     waivedRules?: string[];
     title?: string;
+    /** §3.8: set at creation, never at draw time. At creation nobody has
+     *  applied, so it cannot be steered by who turns up. */
+    reservedForNewcomers?: boolean;
   }): Promise<{ bountyId: string; title: string }> {
     const fullName = input.repo;
     const repo = await this.repo(fullName);
@@ -264,11 +267,12 @@ export class BountyService {
 
     const bountyId = randomUUID();
     await this.d.db.query(
-      `INSERT INTO bounties (id, repo_id, issue_number, issue_title, amount_minor, currency, mint, network, status, pricing, created_by, is_test, waived_eligibility_rules)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'posted','{}'::jsonb,$9,$10,$11)`,
+      `INSERT INTO bounties (id, repo_id, issue_number, issue_title, amount_minor, currency, mint, network, status, pricing, created_by, is_test, waived_eligibility_rules, reserved_for_newcomers)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'posted','{}'::jsonb,$9,$10,$11,$12)`,
       [
         bountyId, repo.id, input.issueNumber, title.slice(0, 300), input.amountMinor.toString(),
         currency, mint.mint, this.d.cfg.network, input.createdBy, input.isTest === true, input.waivedRules ?? [],
+        input.reservedForNewcomers === true,
       ],
     );
     return { bountyId, title };
