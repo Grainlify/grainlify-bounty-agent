@@ -15,11 +15,26 @@ This is an entry for the AnsemHack Clawrena (Inference Markets and ClawPump × p
 | Inference budget governor (`packages/budget`) | $5.00 lifetime ceiling, per-phase allocations, and atomic reservations. |
 | Signer service (`services/signer`) | Separate process with its own spend journal and ceiling. It can only pay allowlisted UsePod quotes. |
 | Receipts and spend ledger (`packages/db`) | Postgres. |
+| Public ledger metrics | Served-call counts by scheme, inference and network-fee totals, cost per served call and per merged PR (`null` when the denominator is 0). |
 | Payout gate (`packages/gate`) | A deterministic function with 13 checks that fails closed. No model output is an input. |
 | Wallet linking | A signed `/grainlify link …` comment. GitHub proves the account and the signature proves the wallet. |
 | Human approval | Ed25519-signed by an approver key that never reaches the agent. It commits to recipient, amount, mint, network and bounty. |
 | Payout signer (`services/signer/src/payout`) | Separate key and journal. Pays only with a valid approval, and re-checks the merge on GitHub, its own repo allowlist, the $50/bounty and $150/day hard caps, and "paid once". |
 | Agent (`apps/agent`) | GitHub App webhooks (HMAC checked, delivery-deduped), bounty pricing and PR review over x402, gate on merge, approve CLI. |
+
+## Public ledger
+
+The public ledger endpoint returns each receipt plus a `metrics` object:
+
+| Field | Meaning |
+|---|---|
+| `servedCalls.onChain` / `surplusCredit` / `total` | Counts of served inference calls by x402 scheme. Always numbers; `0` when empty. |
+| `inferenceTotal` | Sum of inference cost for served calls. `0` when empty. |
+| `networkFeeTotal` | Sum of Solana network fees for served calls. `0` when empty. |
+| `costPerServedCall` | Mean of inference + network fee per served call, or `null` if none have been served. |
+| `costPerMergedPr` | Those same totals divided by merged PRs, or `null` if none have merged yet. |
+
+Attach it from the handler with `metrics: buildLedgerMetrics({ servedCalls, mergedPrCount })` (`apps/agent/src/ledger-metrics.ts`). Ratios use `null` when the denominator is 0 so an empty ledger is not reported as free.
 
 ## Money safety
 
