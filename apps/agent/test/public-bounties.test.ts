@@ -136,3 +136,64 @@ describe('what to publish about a pool', () => {
     expect(poolVisibility(3, 'bucketed', null)).toMatchObject({ applicantBucket: 'few', applicantCount: null });
   });
 });
+
+describe.skipIf(!dbUrl)('the published rules', () => {
+  let db2: pg.Pool;
+  let api2: PublicApi;
+
+  beforeAll(async () => {
+    db2 = await freshDatabase(dbUrl!, 'test_public_rules');
+    api2 = new PublicApi(db2, p2Config({ mints: {}, trustedApprovers: [] }));
+  });
+  afterAll(async () => {
+    await db2?.end();
+  });
+
+  it('publishes every weight with its value and its coded default', async () => {
+    const r = await api2.rules();
+    const byKey = Object.fromEntries(r.settings.map((s) => [s.key, s]));
+    expect(byKey.weight_fit_strong).toMatchObject({ value: '2.0', default: '2.0', overridden: false });
+    expect(byKey.weight_fit_plausible).toMatchObject({ value: '1.0' });
+    expect(byKey.weight_fit_weak).toMatchObject({ value: '0.25' });
+    expect(byKey.weight_first_ever_application).toMatchObject({ value: '1.5' });
+    expect(byKey.weight_per_abandon).toMatchObject({ value: '0.5' });
+    expect(byKey.application_window_hours).toMatchObject({ value: '6' });
+  });
+
+  it('shows an override as an override, with who changed it', async () => {
+    // A weight that moved with no name against it is what makes a result
+    // arguable rather than answerable.
+    await db2.query(`INSERT INTO bounty_config (key, value, updated_by) VALUES ('weight_fit_strong','3.0','Jagadeeshftw')
+                     ON CONFLICT (key) DO UPDATE SET value = '3.0', updated_by = 'Jagadeeshftw'`);
+    const r = await api2.rules();
+    const s = r.settings.find((x) => x.key === 'weight_fit_strong')!;
+    expect(s).toMatchObject({ value: '3.0', default: '2.0', overridden: true, updatedBy: 'Jagadeeshftw' });
+    expect(s.updatedAt).not.toBeNull();
+    await db2.query(`DELETE FROM bounty_config WHERE key = 'weight_fit_strong'`);
+  });
+
+  it('publishes the prior-completion cap and says it is not a setting', async () => {
+    const r = await api2.rules();
+    expect(r.structural.priorCompletionCap).toBe(2);
+    expect(r.structural.priorCompletionCapNote).toContain('not a setting');
+    // It must not appear among the editable settings, or the page would be
+    // promising something a config edit could quietly undo.
+    expect(r.settings.some((s) => s.key.includes('prior_completion_cap'))).toBe(false);
+  });
+
+  it('names what the draw can never read, which is the claim people check', async () => {
+    const r = await api2.rules();
+    expect(r.structural.neverWeighted).toEqual(
+      expect.arrayContaining(['follower count', 'stars', 'merge rate', 'total pull request count', 'how well the application is written']),
+    );
+    expect(r.structural.neverWeightedNote).toContain('no code path');
+  });
+
+  it('answers on an empty database, because defaults live in code', async () => {
+    const fresh = await freshDatabase(dbUrl!, 'test_public_rules_empty');
+    const r = await new PublicApi(fresh, p2Config({ mints: {}, trustedApprovers: [] })).rules();
+    expect(r.settings.every((s) => !s.overridden)).toBe(true);
+    expect(r.settings.length).toBeGreaterThan(10);
+    await fresh.end();
+  });
+});

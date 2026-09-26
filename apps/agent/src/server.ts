@@ -129,6 +129,7 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         }
         if (req.method !== 'GET') return pub(405, { error: 'read-only' });
         if (url.pathname === '/public/status') return pub(200, d.publicApi.status());
+        if (url.pathname === '/public/rules') return pub(200, await d.publicApi.rules());
         if (url.pathname === '/public/ledger') return pub(200, await d.publicApi.ledger());
         if (url.pathname === '/public/bounties') return pub(200, { status: d.publicApi.status(), bounties: await d.publicApi.bounties() });
         const b = /^\/public\/bounties\/([0-9a-f-]{36})$/.exec(url.pathname);

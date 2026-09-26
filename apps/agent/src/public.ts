@@ -12,7 +12,8 @@
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
-import { applicantBucket, withDefaults } from '../../../packages/gate/src/draw-config.ts';
+import { applicantBucket, DRAW_SETTINGS, withDefaults } from '../../../packages/gate/src/draw-config.ts';
+import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 
 export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
@@ -219,6 +220,69 @@ export class PublicApi {
       assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
       ...poolVisibility(Number(b.applicant_count ?? 0), visibility, b.applications_close_at),
     }));
+  }
+
+  /**
+   * The rules, published. Every setting with its live value, its coded
+   * default, and whether a person has overridden it.
+   *
+   * AI-specs.md §4.5: "Publish the weights on the platform before the event.
+   * A contributor who reads them and responds by writing better code is not
+   * farming - that is the platform working." The same holds here: odds nobody
+   * can read are indistinguishable from odds that are made up.
+   *
+   * Public and unauthenticated on purpose. There is nothing here a
+   * contributor should have to sign in to learn, and a rule you must be
+   * logged in to read is not really published.
+   */
+  async rules() {
+    const stored = await this.db
+      .query<{ key: string; value: string; updated_at: Date; updated_by: string }>(
+        `SELECT key, value, updated_at, updated_by FROM bounty_config`,
+      )
+      .catch(() => ({ rows: [] as { key: string; value: string; updated_at: Date; updated_by: string }[] }));
+    const byKey = new Map(stored.rows.map((x) => [x.key, x]));
+
+    return {
+      status: this.status(),
+      // Named and explained rather than left as a bare number, because it is
+      // the rule contributors plan around.
+      structural: {
+        priorCompletionCap: PRIOR_COMPLETION_CAP,
+        priorCompletionCapNote:
+          `A win multiplies your tickets, but only for your first ${PRIOR_COMPLETION_CAP} completed bounties. ` +
+          'It is a constant in the code, not a setting, so nobody can raise it mid-programme: it is what stops ' +
+          'accumulated wins from overtaking capability for the bounty actually in front of you.',
+        neverWeighted: [
+          'total pull request count',
+          'merge rate',
+          'follower count',
+          'stars',
+          'total contributions',
+          'how well the application is written',
+        ],
+        neverWeightedNote:
+          'All of these are farmable and all of them penalise newcomers. They are absent by omission: ' +
+          'there is no code path in the draw that can read them.',
+      },
+      sections: [...new Set(DRAW_SETTINGS.map((s) => s.section))],
+      settings: DRAW_SETTINGS.map((s) => {
+        const row = byKey.get(s.key);
+        return {
+          key: s.key,
+          type: s.type,
+          section: s.section,
+          description: s.description,
+          default: s.default,
+          value: row?.value ?? s.default,
+          overridden: row !== undefined,
+          // Who changed it and when. A weight that moved without a name
+          // against it is the kind of thing that makes a result arguable.
+          updatedAt: row ? new Date(row.updated_at).toISOString() : null,
+          updatedBy: row?.updated_by ?? null,
+        };
+      }),
+    };
   }
 
   async ledger() {
