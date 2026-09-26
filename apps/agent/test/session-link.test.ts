@@ -125,7 +125,7 @@ describe.skipIf(!dbUrl)('wallet link from a Grainlify session (HTTP + Postgres)'
     expect(pre.status).toBe(204);
     expect(pre.headers.get('access-control-allow-origin')).toBe(ORIGIN);
     expect(pre.headers.get('access-control-allow-methods')).toBe('POST, OPTIONS');
-    expect(pre.headers.get('access-control-allow-headers')).toBe('content-type');
+    expect(pre.headers.get('access-control-allow-headers')).toBe('*');
     // An unrecognised origin gets a readable answer, not silence: it is still
     // refused by the signature checks, and withholding the header only ever
     // hid working replies from browser extensions that rewrite Origin.

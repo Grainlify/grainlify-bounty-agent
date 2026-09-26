@@ -29,7 +29,11 @@ describe('CORS answers every caller, whatever Origin they send', () => {
     expect(corsHeaders('https://grainlify.com', allowed).vary).toBe('Origin');
   });
 
-  it('allows the content-type header on POST routes', () => {
-    expect(corsHeaders('https://x.test', allowed, 'POST, OPTIONS')['access-control-allow-headers']).toBe('content-type');
+  it('allows any header on POST routes, not just content-type', () => {
+    // An extension that adds one header to the page's fetch makes it a
+    // preflighted request. Listing only content-type meant the browser refused
+    // to send the real request at all -- reproduced with a single injected
+    // header against an otherwise correct call.
+    expect(corsHeaders('https://x.test', allowed, 'POST, OPTIONS')['access-control-allow-headers']).toBe('*');
   });
 });

@@ -47,7 +47,18 @@ export function corsHeaders(origin: string | undefined, allowed: string[], metho
     'access-control-allow-methods': methods,
     'access-control-max-age': '600',
   };
-  if (methods.includes('POST')) h['access-control-allow-headers'] = 'content-type';
+  // Any header, not just content-type.
+  //
+  // A browser extension that adds a header to the page's fetch -- a request id,
+  // a tracing tag -- turns it into a preflighted request whose
+  // Access-Control-Request-Headers we did not list, and the browser then
+  // refuses to send the real request at all. Reproduced exactly that way: one
+  // injected header was enough to break a call that is otherwise correct.
+  //
+  // `*` is legal here because these responses are never credentialled. It says
+  // "any header may be sent", not "any caller is authorised" -- authorisation
+  // is the signature checks, which do not care what headers arrived.
+  if (methods.includes('POST')) h['access-control-allow-headers'] = '*';
   return h;
 }
 
