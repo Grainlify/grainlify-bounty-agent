@@ -10,6 +10,7 @@ import { SignerClient } from '../../../services/signer/src/client.ts';
 import { allowedPayoutNetworks, p2Config } from './config.ts';
 import { GitHubAppClient } from './github.ts';
 import { PayoutSignerClient } from './payout-client.ts';
+import { DrawService } from './draw-service.ts';
 import { BountyService } from './service.ts';
 import { PublicApi, publicOrigins } from './public.ts';
 
@@ -68,5 +69,12 @@ export async function wire() {
   // becoming "temporary" and permanent.
   const payoutsApiToken = env.PAYOUTS_API_TOKEN?.trim() || undefined;
   if (payoutsApiToken && payoutsApiToken.length < 32) throw new Error('PAYOUTS_API_TOKEN must be at least 32 characters');
-  return { db, gh, service, cfg, webhookSecret: app.webhook_secret, publicApi: new PublicApi(db, cfg), publicOrigins: publicOrigins(env), payoutsApiToken };
+  const draw = new DrawService({ db, gh, now: () => new Date() });
+  return {
+    db, gh, service, cfg, draw, linkCountersignKey,
+    webhookSecret: app.webhook_secret,
+    publicApi: new PublicApi(db, cfg),
+    publicOrigins: publicOrigins(env),
+    payoutsApiToken,
+  };
 }

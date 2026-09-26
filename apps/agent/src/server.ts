@@ -6,7 +6,9 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type pg from 'pg';
 import type { Approval } from '../../../packages/gate/src/approval.ts';
 import type { BountyService } from './service.ts';
+import type { DrawService } from './draw-service.ts';
 import { corsHeaders, type PublicApi } from './public.ts';
+import { verifySessionAction } from '../../../packages/gate/src/session-action.ts';
 
 export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
   if (!header?.startsWith('sha256=')) return false;
@@ -33,6 +35,17 @@ export interface ServerDeps {
    */
   payoutsApiToken?: string;
   /**
+   * Applications, the draw and the admin controls. Absent in the tests that
+   * only exercise the webhook and the link routes, so those routes answer 503
+   * rather than crashing - a half-wired server should say which half.
+   */
+  draw?: DrawService;
+  /**
+   * Public half of the key Grainlify-Backend signs apply and admin messages
+   * with. The same key as the wallet link; different domains inside it.
+   */
+  linkCountersignKey?: string;
+  /**
    * One line per request. Default console.log; tests pass their own.
    *
    * It exists because when a link did not appear, the logs held only the boot
@@ -48,6 +61,13 @@ export interface ServerDeps {
    */
   log?: (line: string) => void;
   onError?: (e: unknown) => void;
+  /**
+   * The clock the signed-message checks use. Injectable for the same reason
+   * the service's is: a route that reads new Date() directly cannot have its
+   * expiry behaviour tested, and one of the three message verifiers already
+   * shipped with that gap.
+   */
+  now?: () => Date;
 }
 
 /** Constant-time bearer check, so a wrong token cannot be found a byte at a time. */
@@ -217,6 +237,94 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         inflight.add(p);
         void p.finally(() => inflight.delete(p));
         return send(202, { accepted: true });
+      }
+
+      // ---------------------------------------------------------- the draw
+      //
+      // Both routes take a message Grainlify-Backend countersigned, naming the
+      // person and the action. The browser never asserts who it is here, for
+      // the same reason it no longer asks about its own wallet: a page can
+      // claim any login, and an extension rewrites every request it makes.
+      //
+      // Authorisation is split deliberately. That the caller IS who the
+      // message says is proved by the signature; that they are ALLOWED to run
+      // an admin action is Grainlify's judgement, made before it signs. This
+      // service checks the first and trusts the second, and the admin domain
+      // is what keeps a contributor's apply message from reaching either.
+      if (req.method === 'POST' && (url.pathname === '/bounties/apply' || url.pathname === '/admin/draw')) {
+        const isAdmin = url.pathname === '/admin/draw';
+        const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
+        const reply = (status: number, body: unknown) => {
+          res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...cors });
+          res.end(JSON.stringify(body));
+        };
+        if (!d.draw || !d.linkCountersignKey) return reply(503, { error: 'draw_not_configured', detail: 'the draw is not switched on for this agent' });
+
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8')) as Record<string, unknown>;
+        } catch {
+          note = ' draw=refused reason=malformed';
+          return reply(400, { error: 'malformed', detail: 'the body must be JSON under 16 KB' });
+        }
+        const v = verifySessionAction(
+          { message: body?.message, countersignature: body?.countersignature },
+          d.linkCountersignKey,
+          isAdmin ? 'admin' : 'apply',
+          (d.now ?? (() => new Date()))(),
+        );
+        if (!v.ok) {
+          note = ` draw=refused reason=${v.code}`;
+          return reply(400, { error: v.code, detail: v.reason });
+        }
+        const f = v.fields;
+
+        // One use per message, whoever replays it. Shared with the wallet
+        // link's nonce table: a nonce is a nonce, and two tables would mean
+        // two places to get the uniqueness wrong.
+        const spent = await d.db.query(
+          `INSERT INTO link_nonces (nonce, github_user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING nonce`,
+          [f.nonce, f.githubUserId],
+        );
+        if (!spent.rowCount) {
+          note = ' draw=refused reason=nonce_used';
+          return reply(409, { error: 'nonce_used', detail: 'that request was already used; try again' });
+        }
+
+        if (!isAdmin) {
+          const r = await d.draw.apply({ bountyId: f.subject, githubUserId: f.githubUserId, githubLogin: f.login });
+          note = ` apply=${r.ok ? 'accepted' : r.error} github=${f.githubUserId}`;
+          return r.ok
+            ? reply(r.status, { applied: true, applicationId: r.applicationId, closesAt: r.closesAt })
+            : reply(r.status, { error: r.error, detail: r.detail });
+        }
+
+        // Admin actions. Each one names itself in the signed message, so a
+        // signature issued to read application counts cannot run a draw.
+        note = ` admin=${f.action} by=${f.login}`;
+        switch (f.action) {
+          case 'list_settings':
+            return reply(200, { settings: await d.draw.settings() });
+          case 'set_setting': {
+            const r = await d.draw.setSetting(f.subject, String(body.value ?? ''), f.login);
+            return r.ok ? reply(200, { ok: true, settings: await d.draw.settings() }) : reply(400, { error: 'invalid_value', detail: r.error });
+          }
+          case 'reset_setting': {
+            const r = await d.draw.resetSetting(f.subject);
+            return r.ok ? reply(200, { ok: true, settings: await d.draw.settings() }) : reply(400, { error: 'unknown_setting', detail: r.error });
+          }
+          case 'bounty_state':
+            return reply(200, {
+              applications: await d.draw.applicationsFor(f.subject),
+              draws: await d.draw.drawsFor(f.subject),
+            });
+          case 'run_draw': {
+            const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true });
+            return 'error' in r ? reply(409, r) : reply(200, r);
+          }
+          default:
+            return reply(400, { error: 'unknown_action', detail: `no admin action named ${f.action}` });
+        }
       }
 
       const m = /^\/api\/payouts\/([0-9a-f-]{36})(\/approve)?$/.exec(url.pathname);
