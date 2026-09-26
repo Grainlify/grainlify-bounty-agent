@@ -21,6 +21,7 @@ function facts(over: Partial<GateFacts['bounty']> = {}, paidTodayMinor = 0n): Ga
     pr: { number: 7, merged: true, mergedByLogin: 'maintainer', mergedByPermission: 'admin', authorId: 42, authorLogin: 'contributor', authorType: 'User', closesIssues: [3] },
     author: { createdAt: new Date('2020-01-01T00:00:00Z') },
     wallet: { address: 'Wa11et1111111111111111111111111111111111111' },
+    assignment: { githubUserId: 42, githubLogin: 'contributor' },
     bountyAlreadyHasPayout: false,
     paidTodayMinor,
   } as GateFacts;

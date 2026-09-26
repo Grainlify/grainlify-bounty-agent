@@ -27,6 +27,14 @@ export interface GateFacts {
   author: { createdAt: Date } | null;
   /** The author's live linked wallet, if any. */
   wallet: { address: string } | null;
+  /**
+   * The live assignment for this bounty, if the draw has made one.
+   *
+   * null means nobody holds it. That is NOT a pass: under the draw, a bounty
+   * with no assignment is one nobody was chosen for, and paying a PR against
+   * it would make the draw decorative.
+   */
+  assignment: { githubUserId: number; githubLogin: string } | null;
   /** A payout for this bounty already exists that is not 'refused'. */
   bountyAlreadyHasPayout: boolean;
   /** Sum of payouts (any status except refused/failed) created today, same currency, minor units. */
@@ -77,6 +85,32 @@ export function evaluateGate(f: GateFacts, p: GatePolicy, now: Date): GateResult
     mergedBy !== null && mergedBy.toLowerCase() !== f.pr.authorLogin.toLowerCase(),
     `author ${f.pr.authorLogin}, merged by ${mergedBy ?? 'unknown'}`,
   );
+
+  // The check the draw exists for.
+  //
+  // Bounties are assigned by a weighted draw before any code is written. That
+  // is worth nothing if a merged PR from anybody can still be paid: the first
+  // programme ran on "whoever opens the first pull request wins" and produced
+  // 23 pull requests from 11 people for 3 issues, all but 3 of them wasted by
+  // design. Without this check the draw picks a winner and the gate ignores
+  // it, which is the same outcome with extra steps.
+  //
+  // This is GrainHack's AI-specs.md §2.4 rule 5, "The PR author was the
+  // Grainlify-assigned contributor for that issue", applied to bounties.
+  //
+  // Matched on the GitHub user id, never the login: logins are renameable and
+  // an attacker who can rename is otherwise handed the bounty.
+  if (f.assignment === null) {
+    check('assigned_to_author', false, 'nobody holds this bounty; it must be won in the draw before a pull request can be paid');
+  } else {
+    check(
+      'assigned_to_author',
+      f.assignment.githubUserId === f.pr.authorId,
+      f.assignment.githubUserId === f.pr.authorId
+        ? `assigned to ${f.assignment.githubLogin}, who opened PR #${f.pr.number}`
+        : `assigned to ${f.assignment.githubLogin} (id ${f.assignment.githubUserId}), but PR #${f.pr.number} was opened by ${f.pr.authorLogin} (id ${f.pr.authorId})`,
+    );
+  }
 
   check('author_not_bot', f.pr.authorType === 'User' && !f.pr.authorLogin.toLowerCase().endsWith('[bot]'), `author type ${f.pr.authorType}`);
   if (f.author === null) {

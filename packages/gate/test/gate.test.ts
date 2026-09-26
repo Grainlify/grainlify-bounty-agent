@@ -15,6 +15,7 @@ function facts(over: Partial<{ [K in keyof GateFacts]: Partial<GateFacts[K]> | G
     pr: { number: 7, merged: true, mergedByLogin: 'maintainer', mergedByPermission: 'admin', authorId: 42, authorLogin: 'contributor', authorType: 'User', closesIssues: [3] },
     author: { createdAt: new Date('2020-01-01T00:00:00Z') },
     wallet: { address: 'Wa11et1111111111111111111111111111111111111' },
+    assignment: { githubUserId: 42, githubLogin: 'contributor' },
     bountyAlreadyHasPayout: false,
     paidTodayMinor: 0n,
   };
@@ -71,5 +72,41 @@ describe('payout gate', () => {
 
   it('allows exactly the per-bounty cap and exactly the remaining daily cap', () => {
     expect(evaluateGate(facts({ bounty: { amountMinor: 50_000_000n }, paidTodayMinor: 100_000_000n }), policy, now).pass).toBe(true);
+  });
+});
+
+describe('only the contributor who won the draw can be paid', () => {
+  // The whole point of drawing a winner before any code is written. Without
+  // this, the draw picks somebody and the gate pays whoever merged first -
+  // which is the behaviour the draw replaced, with extra steps.
+  it('passes when the assignee opened the pull request', () => {
+    expect(evaluateGate(facts(), policy, now).checks.find((c) => c.name === 'assigned_to_author')).toMatchObject({ pass: true });
+  });
+
+  it('fails when somebody else opened it, however good the pull request is', () => {
+    const r = evaluateGate(facts({ assignment: { githubUserId: 99, githubLogin: 'someone-else' } }), policy, now);
+    expect(r.pass).toBe(false);
+    const c = r.checks.find((x) => x.name === 'assigned_to_author')!;
+    expect(c.pass).toBe(false);
+    expect(c.detail).toContain('someone-else');
+    expect(c.detail).toContain('contributor');
+  });
+
+  it('fails when nobody holds the bounty at all', () => {
+    // An unassigned bounty is one nobody was drawn for. Paying it would make
+    // the draw decorative.
+    const r = evaluateGate(facts({ assignment: null }), policy, now);
+    expect(r.pass).toBe(false);
+    expect(r.checks.find((c) => c.name === 'assigned_to_author')).toMatchObject({ pass: false });
+  });
+
+  it('matches on the GitHub id, not the login', () => {
+    // Logins are renameable. Matching on them hands the bounty to anyone who
+    // can rename themselves to the winner's handle.
+    const renamed = facts({ assignment: { githubUserId: 42, githubLogin: 'old-name' } });
+    expect(evaluateGate(renamed, policy, now).checks.find((c) => c.name === 'assigned_to_author')).toMatchObject({ pass: true });
+
+    const impostor = facts({ assignment: { githubUserId: 77, githubLogin: 'contributor' } });
+    expect(evaluateGate(impostor, policy, now).checks.find((c) => c.name === 'assigned_to_author')).toMatchObject({ pass: false });
   });
 });

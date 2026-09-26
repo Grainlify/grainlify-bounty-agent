@@ -140,6 +140,20 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
       headSha: `sha-${n}`, title: `Fix #${n - 100}`, body: `Closes #${n - 100}`, closes: [n - 100], diff: 'diff --git a/x b/x\n+fix', ...over,
     });
   };
+  /**
+   * Gives the bounty to somebody, the way the draw would.
+   *
+   * Every one of these tests used to reach the payout gate with no assignment
+   * at all, and passed - which is exactly the hole assigned_to_author closes.
+   * The loop now has to assign before it can pay, like the real flow.
+   */
+  const assign = async (bountyId: string, githubUserId = 2, githubLogin = 'contributor') => {
+    await db.query(
+      `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at)
+       VALUES ($1, $2, $3, 'active', now() + interval '3 days')`,
+      [bountyId, githubUserId, githubLogin],
+    );
+  };
   const merge = (n: number, by = 'maintainer') => Object.assign(gh.pulls.get(gh.key(REPO, n))!, { state: 'closed', merged: true, mergedByLogin: by, mergedAt: new Date().toISOString() });
   const linkComment = (login: string, id: number, kp: Keypair, issue = 1) => {
     const issuedAt = new Date().toISOString();
@@ -152,6 +166,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
 
     // 1. A maintainer picks the issue; one x402 call prices it; the bounty is posted.
     const proposed = await service.proposeBounty(REPO, 1, 'maintainer');
+    await assign(proposed.bountyId);
     expect(proposed.amount).toBe(20_000_000n); // mock suggests $20, inside the $5-$50 range
     expect(gh.comments.at(-1)!.body).toMatch(/### Bounty: 20 test USDC/);
     expect(gh.comments.at(-1)!.body).toMatch(/mock gateway \(test run, no real payment\)/);
@@ -205,6 +220,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
   it('refuses a self-merged PR and pays nothing', async () => {
     gh.issues.set(gh.key(REPO, 2), { number: 2, title: 'Add docs', body: 'Document the API.', state: 'open', authorLogin: 'maintainer' });
     const b = await service.proposeBounty(REPO, 2, 'maintainer');
+    await assign(b.bountyId);
     pr(102);
     merge(102, 'contributor');
     await webhook('pull_request', { action: 'closed', repository: { full_name: REPO }, pull_request: { number: 102 } });
@@ -217,6 +233,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
   it('refuses a young account without a wallet, and fails closed when GitHub user lookup fails', async () => {
     gh.issues.set(gh.key(REPO, 3), { number: 3, title: 'Bug', body: 'Crash on start.', state: 'open', authorLogin: 'maintainer' });
     const b = await service.proposeBounty(REPO, 3, 'maintainer');
+    await assign(b.bountyId, 3, 'newbie');
     pr(103, { authorId: 3, authorLogin: 'newbie' });
     merge(103);
     await webhook('pull_request', { action: 'closed', repository: { full_name: REPO }, pull_request: { number: 103 } });
@@ -226,6 +243,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
 
     gh.issues.set(gh.key(REPO, 4), { number: 4, title: 'Bug 2', body: 'Another.', state: 'open', authorLogin: 'maintainer' });
     const b2 = await service.proposeBounty(REPO, 4, 'maintainer');
+    await assign(b2.bountyId);
     pr(104);
     merge(104);
     gh.failUserLookup = true;
@@ -245,6 +263,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
   it('refuses a forged or mismatched approval and pays nothing', async () => {
     gh.issues.set(gh.key(REPO, 5), { number: 5, title: 'Feature', body: 'Add a flag.', state: 'open', authorLogin: 'maintainer' });
     const b = await service.proposeBounty(REPO, 5, 'maintainer');
+    await assign(b.bountyId);
     pr(105);
     merge(105);
     await webhook('pull_request', { action: 'closed', repository: { full_name: REPO }, pull_request: { number: 105 } });

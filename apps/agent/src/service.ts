@@ -450,7 +450,7 @@ export class BountyService {
   }
 
   private async runGate(fullName: string, repo: { id: string; enabled: boolean }, b: Record<string, unknown>, pr: Awaited<ReturnType<GitHubApi['getPull']>>) {
-    const [closes, mergedByPermission, author, wallet, existing, today] = await Promise.all([
+    const [closes, mergedByPermission, author, wallet, existing, today, assignment] = await Promise.all([
       this.d.gh.closingIssues(fullName, pr.number),
       pr.mergedByLogin ? this.d.gh.permission(fullName, pr.mergedByLogin).catch(() => null) : Promise.resolve(null),
       this.d.gh.getUser(fullName, pr.authorLogin).catch(() => null),
@@ -459,6 +459,14 @@ export class BountyService {
       this.d.db.query(
         `SELECT COALESCE(SUM(amount_minor), 0)::text AS s FROM payouts WHERE currency = $1 AND status NOT IN ('refused','failed') AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
         [b.currency],
+      ),
+      // Who the draw gave this bounty to. Only a live assignment counts: one
+      // that went stale or was released is not a claim on the money.
+      this.d.db.query(
+        `SELECT github_user_id, github_login FROM bounty_assignments
+          WHERE bounty_id = $1 AND status IN ('active','pr_submitted','completed')
+          ORDER BY assigned_at DESC LIMIT 1`,
+        [b.id],
       ),
     ]);
     const facts: GateFacts = {
@@ -471,6 +479,9 @@ export class BountyService {
       // The author must be who GitHub says opened the PR; a lookup for a different id is treated as a failed lookup.
       author: author && author.id === pr.authorId ? { createdAt: author.createdAt } : null,
       wallet: wallet.rows[0] ? { address: String(wallet.rows[0].address) } : null,
+      assignment: assignment.rows[0]
+        ? { githubUserId: Number(assignment.rows[0].github_user_id), githubLogin: String(assignment.rows[0].github_login) }
+        : null,
       bountyAlreadyHasPayout: (existing.rowCount ?? 0) > 0,
       paidTodayMinor: BigInt(String(today.rows[0].s)),
     };
