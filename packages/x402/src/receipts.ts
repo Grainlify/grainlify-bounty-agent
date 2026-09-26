@@ -3,7 +3,7 @@
 
 import type { Phase } from '../../budget/src/governor.ts';
 
-export type CallPurpose = 'triage' | 'price' | 'review' | 'crosscheck' | 'spike' | 'eval';
+export type CallPurpose = 'triage' | 'price' | 'review' | 'crosscheck' | 'fit' | 'spike' | 'eval';
 
 export type CallStatus =
   | 'quoting'
@@ -23,6 +23,9 @@ export interface CallLinks {
   issueNumber?: number;
   prNumber?: number;
   evalItemId?: string;
+  /** The bounty application a fit call was bought for, so cost per
+   *  application is a join rather than an estimate. */
+  applicationId?: string;
 }
 
 export interface InferenceCallRecord {

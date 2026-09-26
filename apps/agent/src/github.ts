@@ -40,6 +40,25 @@ export interface GitHubApi {
   ciState(repo: string, sha: string): Promise<CiState>;
   comment(repo: string, issueNumber: number, body: string): Promise<{ id: number; url: string }>;
   review(repo: string, prNumber: number, commitSha: string, body: string): Promise<{ id: number }>;
+  /**
+   * Public evidence about one contributor, for the fit assessment.
+   *
+   * Everything here is on their GitHub profile already. Note what is NOT
+   * gathered: followers, stars, total commits, total contributions. They are
+   * not fetched rather than fetched-and-ignored, so no later change can
+   * quietly start weighting them.
+   */
+  contributorEvidence(repo: string, login: string, issueLanguage: string): Promise<ContributorEvidence>;
+}
+
+export interface ContributorEvidence {
+  account_age_days: number;
+  public_repo_count: number;
+  languages: { lang: string; bytes: number; repo_count: number }[];
+  recent_repos: { name: string; description: string; language: string; last_commit: string }[];
+  sample_diffs: { repo: string; title: string; diff: string }[];
+  /** Set when something could not be read, so a thin snapshot is explainable. */
+  note?: string;
 }
 
 export class GitHubAppClient implements GitHubApi {
@@ -134,6 +153,69 @@ export class GitHubAppClient implements GitHubApi {
     const r = (await this.repoReq(repo, 'GET', `/repos/${repo}/collaborators/${encodeURIComponent(login)}/permission`)) as { permission: string; role_name?: string };
     const role = r.role_name ?? r.permission;
     return (['admin', 'maintain', 'write', 'triage', 'read'].includes(role) ? role : r.permission === 'none' ? 'none' : 'read') as RepoPermission;
+  }
+
+  async contributorEvidence(repo: string, login: string, issueLanguage: string): Promise<ContributorEvidence> {
+    const user = await this.getUser(repo, login);
+    const ageDays = Math.floor((Date.now() - user.createdAt.getTime()) / 86_400_000);
+    const out: ContributorEvidence = {
+      account_age_days: ageDays,
+      public_repo_count: 0,
+      languages: [],
+      recent_repos: [],
+      sample_diffs: [],
+    };
+
+    let repos: { name: string; description: string | null; language: string | null; pushed_at: string; fork: boolean }[] = [];
+    try {
+      repos = (await this.repoReq(repo, 'GET', `/users/${encodeURIComponent(login)}/repos?sort=pushed&per_page=30`)) as typeof repos;
+    } catch {
+      // A profile we cannot read is not a profile with nothing in it, and the
+      // prompt is told not to punish absence. Recording why keeps those two
+      // cases apart for anyone reading the assessment later.
+      out.note = 'public repositories could not be read';
+      return out;
+    }
+    const own = repos.filter((r) => !r.fork);
+    out.public_repo_count = own.length;
+
+    // Language rollup from repo primaries: one field already present on each
+    // repo, rather than a /languages call per repo. Byte counts are not
+    // available that cheaply, so repo_count carries the signal and bytes stays
+    // 0 - honest about what was measured rather than inventing a number.
+    const byLang = new Map<string, number>();
+    for (const r of own) if (r.language) byLang.set(r.language, (byLang.get(r.language) ?? 0) + 1);
+    out.languages = [...byLang.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8)
+      .map(([lang, repo_count]) => ({ lang, bytes: 0, repo_count }));
+
+    out.recent_repos = own.slice(0, 6).map((r) => ({
+      name: r.name,
+      description: (r.description ?? '').slice(0, 200),
+      language: r.language ?? '',
+      last_commit: r.pushed_at,
+    }));
+
+    // §4.3: "up to 3 merged PRs matching the issue language, truncated to 200
+    // lines each".
+    try {
+      const q = `is:pr is:merged author:${login}${issueLanguage ? ` language:${issueLanguage}` : ''}`;
+      const found = (await this.repoReq(repo, 'GET', `/search/issues?q=${encodeURIComponent(q)}&sort=updated&per_page=3`)) as {
+        items: { title: string; repository_url: string; number: number }[];
+      };
+      for (const item of (found.items ?? []).slice(0, 3)) {
+        const full = item.repository_url.replace('https://api.github.com/repos/', '');
+        const diff = await this.getPullDiff(full, item.number, 20_000).catch(() => '');
+        if (!diff) continue;
+        out.sample_diffs.push({ repo: full, title: item.title, diff: diff.split('\n').slice(0, 200).join('\n') });
+      }
+    } catch {
+      // Search is the flakiest call here and the least essential: the
+      // languages and repos already say most of what the prompt needs.
+      out.note = out.note ? `${out.note}; merged pull requests could not be searched` : 'merged pull requests could not be searched';
+    }
+    return out;
   }
 
   async ciState(repo: string, sha: string): Promise<CiState> {

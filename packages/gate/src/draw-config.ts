@@ -107,6 +107,22 @@ export const DRAW_SETTINGS: Setting[] = [
     min: 1,
     max: 10,
   },
+  {
+    key: 'ai_fit_assessment_enabled',
+    type: 'bool',
+    default: 'false',
+    section: 'Fit assessment',
+    description:
+      'Buy a fit assessment per application. Off means every applicant counts as "plausible" — a full ticket — which is the documented correct answer for most newcomers, so the draw runs unchanged with no model spend.',
+  },
+  {
+    key: 'fit_difficulty_tier',
+    type: 'enum',
+    default: 'standard',
+    section: 'Fit assessment',
+    description: 'The difficulty the fit assessment judges against when a bounty does not state its own.',
+    values: ['easy', 'standard', 'advanced'],
+  },
   // The weights. Same keys and defaults as packages/gate/src/draw.ts reads,
   // and as GrainHack's §3.9 uses, so the published explanation of the odds
   // stays true for both.

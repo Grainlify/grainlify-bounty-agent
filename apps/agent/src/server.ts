@@ -310,7 +310,15 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         }
 
         if (!isAdmin) {
-          const r = await d.draw.apply({ bountyId: f.subject, githubUserId: f.githubUserId, githubLogin: f.login });
+          const r = await d.draw.apply({
+            bountyId: f.subject,
+            githubUserId: f.githubUserId,
+            githubLogin: f.login,
+            // Optional, untrusted, never weighted. It is outside the signed
+            // message on purpose: signing it would imply Grainlify vouches
+            // for words the applicant wrote.
+            applicationText: typeof body.applicationText === 'string' ? body.applicationText : undefined,
+          });
           note = ` apply=${r.ok ? 'accepted' : r.error} github=${f.githubUserId}`;
           return r.ok
             ? reply(r.status, { applied: true, applicationId: r.applicationId, closesAt: r.closesAt })

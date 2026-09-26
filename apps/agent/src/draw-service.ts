@@ -19,12 +19,17 @@ import { randomInt } from 'node:crypto';
 import type pg from 'pg';
 import { boolOf, intOf, isWaivable, DRAW_SETTINGS, validate, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { type DrawApplicant, runDraw } from '../../../packages/gate/src/draw.ts';
+import type { FitService } from './fit-service.ts';
+import { fitEnabled } from './fit-service.ts';
 import type { GitHubApi } from './github.ts';
 
 export interface DrawDeps {
   db: pg.Pool;
   gh: GitHubApi;
   now: () => Date;
+  /** Absent in tests that do not exercise Layer 2; everyone is then
+   *  'plausible', which is a real outcome rather than a stub. */
+  fit?: FitService;
 }
 
 export interface SettingView {
@@ -150,7 +155,7 @@ export class DrawService {
    * is nothing to tell them later, and a row keyed to a bounty that will not
    * run is noise.
    */
-  async apply(input: { bountyId: string; githubUserId: number; githubLogin: string }): Promise<ApplyOutcome> {
+  async apply(input: { bountyId: string; githubUserId: number; githubLogin: string; applicationText?: string }): Promise<ApplyOutcome> {
     const cfg = await this.config();
     const now = this.d.now();
 
@@ -244,18 +249,49 @@ export class DrawService {
       }
     }
 
+    // Trimmed and capped here rather than trusted: it is interpolated into a
+    // prompt, and §4.4 truncates it at 2000 characters anyway.
+    const applicationText = (input.applicationText ?? '').trim().slice(0, 2000);
     const ins = await this.d.db.query<{ id: string }>(
-      `INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status)
-       VALUES ($1, $2, $3, 'applied')
+      `INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status, application_text)
+       VALUES ($1, $2, $3, 'applied', $4)
        ON CONFLICT (bounty_id, github_user_id)
-         DO UPDATE SET status = 'applied', gate_failure_reason = NULL, updated_at = now()
+         DO UPDATE SET status = 'applied', gate_failure_reason = NULL, application_text = EXCLUDED.application_text, updated_at = now()
        RETURNING id`,
-      [input.bountyId, input.githubUserId, input.githubLogin],
+      [input.bountyId, input.githubUserId, input.githubLogin, applicationText || null],
     );
+    const applicationId = ins.rows[0]!.id;
+
+    // Layer 2. Never allowed to fail the application: a model outage, a
+    // budget ceiling or a stray code fence must not decide who is eligible.
+    if (this.d.fit) {
+      const issue = await this.d.db.query<{ issue_title: string | null; issue_number: number }>(
+        `SELECT issue_title, issue_number FROM bounties WHERE id = $1`,
+        [input.bountyId],
+      );
+      await this.d.fit
+        .assess({
+          applicationId,
+          bountyId: input.bountyId,
+          githubUserId: input.githubUserId,
+          githubLogin: input.githubLogin,
+          repo,
+          issue: {
+            title: issue.rows[0]?.issue_title ?? `Issue #${issue.rows[0]?.issue_number ?? 0}`,
+            body: '',
+            acceptanceCriteria: '',
+            difficultyTier: cfg.fit_difficulty_tier ?? 'standard',
+            primaryLanguage: '',
+          },
+          applicationText,
+          enabled: fitEnabled(cfg),
+        })
+        .catch(() => {});
+    }
     return {
       ok: true,
       status: 201,
-      applicationId: ins.rows[0]!.id,
+      applicationId,
       closesAt: new Date(bounty.applications_close_at).toISOString(),
       // The live count is deliberately not returned. Knowing the pool size
       // changes when people apply, and a draw whose odds people try to time is
@@ -266,11 +302,19 @@ export class DrawService {
 
   /** Admin view. Counts and logins; nobody else is shown who applied. */
   async applicationsFor(bountyId: string) {
+    // The fit call's receipt is joined rather than estimated, so "what did
+    // this draw cost" is a fact about payments made, not arithmetic.
     const r = await this.d.db.query<{
-      github_login: string; github_user_id: string; status: string; gate_failure_reason: string | null; fit: string | null; created_at: Date;
+      github_login: string; github_user_id: string; status: string; gate_failure_reason: string | null;
+      fit: string | null; difficulty_match: string | null; fit_evidence: string | null; fit_concerns: string[];
+      created_at: Date; cost_micro: string | null;
     }>(
-      `SELECT github_login, github_user_id, status, gate_failure_reason, fit, created_at
-         FROM bounty_applications WHERE bounty_id = $1 ORDER BY created_at`,
+      `SELECT a.github_login, a.github_user_id, a.status, a.gate_failure_reason, a.fit, a.difficulty_match,
+              a.fit_evidence, a.fit_concerns, a.created_at,
+              (COALESCE(c.paid_micro,0) + COALESCE(c.fee_micro,0))::text AS cost_micro
+         FROM bounty_applications a
+         LEFT JOIN inference_calls c ON c.id = a.fit_call_id
+        WHERE a.bounty_id = $1 ORDER BY a.created_at`,
       [bountyId],
     );
     const rows = r.rows.map((x) => ({
@@ -279,12 +323,25 @@ export class DrawService {
       status: x.status,
       gateFailureReason: x.gate_failure_reason,
       fit: x.fit,
+      difficultyMatch: x.difficulty_match,
+      fitEvidence: x.fit_evidence,
+      fitConcerns: x.fit_concerns ?? [],
+      // null, not 0: "no call was bought" and "a call that cost nothing"
+      // are different claims, and surplus credit really does cost nothing.
+      fitCostMicro: x.cost_micro === null ? null : Number(x.cost_micro),
       appliedAt: new Date(x.created_at).toISOString(),
     }));
+    const assessed = rows.filter((x) => x.fitCostMicro !== null);
+    const totalCostMicro = assessed.reduce((s2, x) => s2 + (x.fitCostMicro ?? 0), 0);
     return {
       total: rows.length,
       eligible: rows.filter((x) => x.status === 'applied' || x.status === 'won' || x.status === 'lost').length,
       refused: rows.filter((x) => x.status === 'rejected_gate').length,
+      fitCost: {
+        assessed: assessed.length,
+        totalMicro: totalCostMicro,
+        perApplicationMicro: assessed.length ? Math.round(totalCostMicro / assessed.length) : null,
+      },
       applications: rows,
     };
   }

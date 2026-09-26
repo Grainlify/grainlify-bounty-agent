@@ -1,7 +1,7 @@
 // An in-memory GitHub for tests: just enough state to drive the bounty loop.
 
 import type { RepoPermission } from '../../../packages/gate/src/gate.ts';
-import type { CiState, GitHubApi, PullInfo, UserInfo } from '../src/github.ts';
+import type { CiState, ContributorEvidence, GitHubApi, PullInfo, UserInfo } from '../src/github.ts';
 
 export class FakeGitHub implements GitHubApi {
   issues = new Map<string, { number: number; title: string; body: string; state: string; authorLogin: string }>();
@@ -11,12 +11,27 @@ export class FakeGitHub implements GitHubApi {
   comments: { repo: string; issue: number; body: string }[] = [];
   reviews: { repo: string; pr: number; sha: string; body: string }[] = [];
   failUserLookup = false;
+  /** Per-login evidence for the fit assessment; anything unset is a thin but
+   *  valid profile, which is the common newcomer case. */
+  evidence = new Map<string, ContributorEvidence>();
   private nextId = 1000;
 
   key = (repo: string, n: number) => `${repo.toLowerCase()}#${n}`;
 
   async installationIdFor() {
     return 42;
+  }
+  async contributorEvidence(_repo: string, login: string): Promise<ContributorEvidence> {
+    const set = this.evidence.get(login.toLowerCase());
+    if (set) return set;
+    const u = this.users.get(login.toLowerCase());
+    return {
+      account_age_days: u ? Math.floor((Date.now() - u.createdAt.getTime()) / 86_400_000) : 0,
+      public_repo_count: 0,
+      languages: [],
+      recent_repos: [],
+      sample_diffs: [],
+    };
   }
   async getIssue(repo: string, n: number) {
     const i = this.issues.get(this.key(repo, n));

@@ -11,6 +11,7 @@ import { allowedPayoutNetworks, p2Config } from './config.ts';
 import { GitHubAppClient } from './github.ts';
 import { PayoutSignerClient } from './payout-client.ts';
 import { DrawService } from './draw-service.ts';
+import { FitService } from './fit-service.ts';
 import { assertMintsAgree } from './mint-check.ts';
 import { BountyService } from './service.ts';
 import { PublicApi, publicOrigins } from './public.ts';
@@ -75,7 +76,8 @@ export async function wire() {
   // forever, so this has to happen at boot, not at payout.
   await assertMintsAgree({ network: cfg.network, mints: cfg.mints }, env);
 
-  const draw = new DrawService({ db, gh, now: () => new Date() });
+  const fit = new FitService({ db, gh, x402, cfg, now: () => new Date() });
+  const draw = new DrawService({ db, gh, fit, now: () => new Date() });
   return {
     db, gh, service, cfg, draw, linkCountersignKey,
     webhookSecret: app.webhook_secret,
