@@ -222,11 +222,18 @@ export class BountyService {
 
   async readLinkFromSession(input: { message: unknown; countersignature: unknown }): Promise<SessionReadOutcome> {
     if (!this.d.linkCountersignKey) return { ok: false, status: 503, error: 'session_links_off', detail: 'wallet linking from Grainlify is not configured' };
-    const v = verifySessionRead(input, this.d.linkCountersignKey, new Date());
+    // this.now(), not new Date(): the link path next door already reads the
+    // injected clock, and one of the two ignoring it means expiry can only be
+    // tested on one of them.
+    const v = verifySessionRead(input, this.d.linkCountersignKey, this.now());
     if (!v.ok) return { ok: false, status: 400, error: v.code, detail: v.reason };
     const f = v.fields;
+    // verified_at is the column; there has never been a linked_at. This read
+    // asked for one and so failed for every caller, from the day it was
+    // written until the day a server-to-server relay finally surfaced the
+    // error text instead of swallowing it in a browser console.
     const r = await this.d.db.query<{ address: string; linked_at: Date }>(
-      `SELECT address, linked_at FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`,
+      `SELECT address, verified_at AS linked_at FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`,
       [f.githubUserId],
     );
     const row = r.rows[0];

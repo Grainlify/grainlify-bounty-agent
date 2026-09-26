@@ -6,6 +6,7 @@ import { generateKeyPairSync, randomBytes, sign } from 'node:crypto';
 import { Keypair } from '@solana/web3.js';
 import { signDetached } from '../src/ed25519.ts';
 import { SESSION_LINK_DOMAIN } from '../src/session-link.ts';
+import { SESSION_READ_DOMAIN } from '../src/session-read.ts';
 
 export function grainlifyKey() {
   const { privateKey, publicKey } = generateKeyPairSync('ed25519');
@@ -33,4 +34,20 @@ export function countersign(key: ReturnType<typeof grainlifyKey>, message: strin
 export function linkRequest(key: ReturnType<typeof grainlifyKey>, wallet: Keypair, a: { login: string; id: number; issued: Date; nonce?: string; ttlMs?: number }) {
   const message = linkMessage({ ...a, wallet: wallet.publicKey.toBase58() });
   return { message, countersignature: countersign(key, message), walletSignature: signDetached(wallet.secretKey, message) };
+}
+
+export function readMessage(a: { login: string; id: number; nonce?: string; issued: Date; ttlMs?: number }) {
+  return [
+    'Grainlify: read my linked wallet',
+    `GitHub: ${a.login} (id ${a.id})`,
+    `Nonce: ${a.nonce ?? randomBytes(16).toString('hex')}`,
+    `Issued: ${iso(a.issued)}`,
+    `Expires: ${iso(new Date(a.issued.getTime() + (a.ttlMs ?? 600_000)))}`,
+  ].join('\n');
+}
+
+/** A read challenge as Grainlify-Backend's GetLink builds and signs it. */
+export function readRequest(key: ReturnType<typeof grainlifyKey>, a: Parameters<typeof readMessage>[0]) {
+  const message = readMessage(a);
+  return { message, countersignature: countersign(key, message, SESSION_READ_DOMAIN) };
 }

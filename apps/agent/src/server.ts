@@ -1,7 +1,7 @@
 // HTTP surface of the agent: the GitHub webhook, the read-only public API
 // for grainlify.com, and a small payouts API used by the approve command.
 
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type pg from 'pg';
 import type { Approval } from '../../../packages/gate/src/approval.ts';
@@ -240,7 +240,25 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       }
       return send(404, { error: 'not found' });
     } catch (e) {
-      return send(400, { error: String(e) });
+      // This used to answer 400 with the raw error string. Both halves were
+      // wrong. A database fault is not a bad request, and reporting it as one
+      // cost a full round of diagnosis chasing a signature that was fine; and
+      // the raw text put internal detail (a column name, in the case that
+      // finally exposed this) in front of whoever asked. The caller now gets a
+      // reference, and the detail stays in our log where it belongs.
+      const ref = randomUUID().slice(0, 8);
+      note = ` error ref=${ref} detail=${JSON.stringify(String(e).slice(0, 500))}`;
+      // If the failure came after a reply had already started there is no
+      // status left to set; the log line above is the whole record of it.
+      if (res.headersSent) return res.end();
+      // Error responses carry the same CORS headers as successful ones -
+      // otherwise a browser reports every server fault as a CORS problem and
+      // hides the status that would have explained it.
+      res.writeHead(500, {
+        'content-type': 'application/json',
+        ...corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'GET, POST, OPTIONS'),
+      });
+      return res.end(JSON.stringify({ error: 'internal', ref }));
     }
   });
 
