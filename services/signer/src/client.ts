@@ -35,7 +35,7 @@ export class SignerClient implements Payer {
     }
     const body = (await r.json().catch(() => ({}))) as Record<string, unknown>;
     if (r.ok) {
-      return { kind: 'paid', payer_wallet: String(body.payer_wallet), signature: String(body.signature), amount_micro: Number(body.amount_micro), fee_micro: Number(body.fee_micro) };
+      return { kind: 'paid', payer_wallet: String(body.payer_wallet), signature: String(body.signature), amount_micro: Number(body.amount_micro), fee_micro: Number(body.fee_micro), fee_lamports: Number(body.feeLamports) };
     }
     // 4xx: refused before anything was sent. 5xx: sent or unknown.
     const error = String(body.error ?? r.status);
