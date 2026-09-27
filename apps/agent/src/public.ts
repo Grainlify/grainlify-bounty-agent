@@ -9,8 +9,10 @@
 //  - While inference is mocked, no dollar figure is reported for it: the mock
 //    ledger records play money, and showing it would overstate real spend.
 
+import { readFileSync } from 'node:fs';
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
+import { computeMetrics, costPerMergedPr, type CallRow, type ListPrice } from '../../../packages/budget/src/metrics.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { applicantBucket, DRAW_SETTINGS, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
@@ -124,6 +126,77 @@ export interface LedgerEvent {
   detail: string;
   amount: string | null;
   proof: { label: string; url: string | null };
+}
+
+export interface PublicLedgerMetrics {
+  /** Count of inference calls that completed and served a response. */
+  servedCalls: number;
+  /** Calls that moved money on-chain (Solana payment transaction). */
+  paidCalls: number;
+  /** Calls served from surplus credit/balance, with no on-chain transaction. */
+  creditCalls: number;
+  /** Served-call count split by payment scheme. */
+  byScheme: {
+    onchain: number;
+    balance: number;
+  };
+  /** Inference total billed by the gateway in micro-units ($1 = 1,000,000). */
+  inferenceMicro: number;
+  inferenceTotalMicro?: number;
+  /** Solana network fees total in micro-units. */
+  feeMicro: number;
+  feeTotalMicro?: number;
+  networkFeeTotalMicro?: number;
+  /** Total spend (inference + network fees) in micro-units. */
+  totalMicro: number;
+  totalSpendMicro?: number;
+  /** Fees as a share of total spend (percentage, e.g. ~99%). null if total is 0. */
+  feeSharePct: number | null;
+  /** Ratio of network fees to inference cost. null if inference cost is 0. */
+  feeToInferenceRatio: number | null;
+  /** Cost per served call in micro-units. null if no calls were served (never 0). */
+  costPerServedCallMicro: number | null;
+  perServedCallMicro?: number | null;
+  /** Cost per on-chain paid call in micro-units. null if no on-chain calls occurred. */
+  costPerPaidCallMicro: number | null;
+  /** Cost per merged PR in micro-units. null if no merged PRs exist yet (never 0). */
+  costPerMergedPrMicro: number | null;
+  perMergedMicro: number | null;
+  /** Number of merged PRs against bounties. */
+  mergedPrCount: number;
+  /** Total spend in micro-units attributed to merged PRs. */
+  attributedMicro: number;
+  /** Spend in micro-units not attributable to any merged PR. */
+  unattributedMicro: number;
+  /** What the same tokens would have cost at the cheapest list price in micro-units. null if unpriced. */
+  listPriceMicro: number | null;
+  /** How many calls could be priced using the list price catalogue. */
+  listPriceModels: number;
+}
+
+export type PublicLedgerAggregates = PublicLedgerMetrics;
+
+let cachedListPrices: Map<string, ListPrice> | null = null;
+
+export function loadListPrices(): Map<string, ListPrice> {
+  if (cachedListPrices) return cachedListPrices;
+  const list = new Map<string, ListPrice>();
+  try {
+    const fileUrl = new URL('../../../fixtures/usepod/marketplace-models.subset.json', import.meta.url);
+    const cat = JSON.parse(readFileSync(fileUrl, 'utf8')) as {
+      models: { model_id?: string; cheapest_input_per_1m?: number; cheapest_output_per_1m?: number }[];
+    };
+    for (const m of cat.models) {
+      const id = m.model_id;
+      if (id && m.cheapest_input_per_1m != null && m.cheapest_output_per_1m != null) {
+        list.set(id, { inputPer1m: m.cheapest_input_per_1m, outputPer1m: m.cheapest_output_per_1m });
+      }
+    }
+  } catch {
+    // no catalogue or unreadable: list prices omitted
+  }
+  cachedListPrices = list;
+  return list;
 }
 
 const shortSig = (s: string) => `${s.slice(0, 5)}…${s.slice(-4)}`;
@@ -319,7 +392,7 @@ export class PublicApi {
     for (const c of calls.rows) {
       const paid = Number(c.paid_micro ?? 0) + Number(c.fee_micro ?? 0);
       events.push({
-        at: new Date(c.created_at).toISOString(),
+        at: c.created_at ? new Date(c.created_at).toISOString() : new Date().toISOString(),
         kind: 'inference',
         bountyId: c.bounty_id ?? null,
         test: mock,
@@ -332,6 +405,81 @@ export class PublicApi {
 
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();
     const paid = bounties.filter((b) => b.payout);
+
+    // Aggregates over all inference calls
+    const rawCalls = await this.db
+      .query(`SELECT scheme, status, model, paid_micro, fee_micro, charged_micro, usage_in, usage_out, links FROM inference_calls`)
+      .catch(() => ({ rows: [] as any[] }));
+    const callRows: CallRow[] = (rawCalls.rows ?? []).map((r: any) => ({
+      scheme: r.scheme ?? null,
+      status: r.status,
+      model: r.model,
+      paidMicro: r.paid_micro === null || r.paid_micro === undefined ? null : Number(r.paid_micro),
+      feeMicro: r.fee_micro === null || r.fee_micro === undefined ? null : Number(r.fee_micro),
+      chargedMicro: r.charged_micro === null || r.charged_micro === undefined ? null : Number(r.charged_micro),
+      usageIn: r.usage_in === null || r.usage_in === undefined ? null : Number(r.usage_in),
+      usageOut: r.usage_out === null || r.usage_out === undefined ? null : Number(r.usage_out),
+      links: r.links ? {
+        repo: r.links.repo,
+        issueNumber: r.links.issueNumber != null ? Number(r.links.issueNumber) : undefined,
+        ...r.links,
+      } : null,
+    }));
+
+    const merged = await this.db
+      .query(
+        `SELECT DISTINCT r.owner, r.name, b.issue_number
+         FROM submissions s
+         JOIN bounties b ON b.id = s.bounty_id
+         JOIN repos r ON r.id = b.repo_id
+         WHERE s.merged_at IS NOT NULL`,
+      )
+      .catch(async () => {
+        return await this.db
+          .query(
+            `SELECT DISTINCT b.repo, b.issue_number
+             FROM submissions s JOIN bounties b ON b.id = s.bounty_id
+             WHERE s.merged_at IS NOT NULL`,
+          )
+          .catch(() => ({ rows: [] as any[] }));
+      });
+    const mergedKeys = new Set(
+      (merged.rows ?? []).map((r: any) => (r.owner && r.name ? `${r.owner}/${r.name}#${r.issue_number}` : `${r.repo}#${r.issue_number}`)),
+    );
+
+    const listPrices = loadListPrices();
+    const m = computeMetrics(callRows, listPrices);
+    const pr = costPerMergedPr(callRows, mergedKeys);
+
+    const metrics: PublicLedgerMetrics = {
+      servedCalls: m.servedCalls,
+      paidCalls: m.paidCalls,
+      creditCalls: m.creditCalls,
+      byScheme: {
+        onchain: m.paidCalls,
+        balance: m.creditCalls,
+      },
+      inferenceMicro: m.inferenceMicro,
+      inferenceTotalMicro: m.inferenceMicro,
+      feeMicro: m.feeMicro,
+      feeTotalMicro: m.feeMicro,
+      networkFeeTotalMicro: m.feeMicro,
+      totalMicro: m.totalMicro,
+      totalSpendMicro: m.totalMicro,
+      feeSharePct: m.feeSharePct,
+      feeToInferenceRatio: m.feeToInferenceRatio,
+      costPerServedCallMicro: m.costPerServedCallMicro,
+      perServedCallMicro: m.costPerServedCallMicro,
+      costPerPaidCallMicro: m.costPerPaidCallMicro,
+      costPerMergedPrMicro: pr.perMergedMicro,
+      perMergedMicro: pr.perMergedMicro,
+      mergedPrCount: pr.merged,
+      attributedMicro: pr.attributedMicro,
+      unattributedMicro: pr.unattributedMicro,
+      listPriceMicro: m.listPriceMicro,
+      listPriceModels: m.listPriceModels,
+    };
+
     return {
       status,
       totals: {
@@ -346,6 +494,8 @@ export class PublicApi {
       },
       budget: PHASES.map((p) => ({ phase: p, allocationMicro: PHASE_ALLOCATION_MICRO[p], spentMicro: totals ? totals.byPhase[p] : 0 })),
       events: events.slice(0, 300),
+      metrics,
+      aggregates: metrics,
     };
   }
 }

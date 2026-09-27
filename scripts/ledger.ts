@@ -74,11 +74,26 @@ if (m.listPriceMicro !== null) {
   console.log('  same tokens at list  no priced model in the catalogue for these calls');
 }
 
-const merged = await pool.query(`
-  SELECT DISTINCT b.repo, b.issue_number
-  FROM submissions s JOIN bounties b ON b.id = s.bounty_id
-  WHERE s.merged_at IS NOT NULL`).catch(() => ({ rows: [] as { repo: string; issue_number: number }[] }));
-const keys = new Set(merged.rows.map((r) => `${r.repo}#${r.issue_number}`));
+const merged = await pool
+  .query(
+    `SELECT DISTINCT r.owner, r.name, b.issue_number
+     FROM submissions s
+     JOIN bounties b ON b.id = s.bounty_id
+     JOIN repos r ON r.id = b.repo_id
+     WHERE s.merged_at IS NOT NULL`,
+  )
+  .catch(async () => {
+    return await pool
+      .query(
+        `SELECT DISTINCT b.repo, b.issue_number
+         FROM submissions s JOIN bounties b ON b.id = s.bounty_id
+         WHERE s.merged_at IS NOT NULL`,
+      )
+      .catch(() => ({ rows: [] as any[] }));
+  });
+const keys = new Set(
+  (merged.rows ?? []).map((r: any) => (r.owner && r.name ? `${r.owner}/${r.name}#${r.issue_number}` : `${r.repo}#${r.issue_number}`)),
+);
 const pr = costPerMergedPr(rows, keys);
 console.log(`\nCost per merged PR:`);
 if (pr.perMergedMicro === null) {

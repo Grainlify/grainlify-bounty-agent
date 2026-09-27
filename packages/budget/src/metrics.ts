@@ -34,7 +34,7 @@ export interface Metrics {
 /** Rounds to a whole micro-unit the way a bill does: never under-state a cost. */
 const up = (n: number) => Math.ceil(n - 1e-9);
 
-export function computeMetrics(rows: CallRow[], list: Map<string, ListPrice>): Metrics {
+export function computeMetrics(rows: CallRow[], list: Map<string, ListPrice> = new Map()): Metrics {
   const served = rows.filter((r) => r.status === 'served');
   const paid = served.filter((r) => r.scheme === 'onchain');
   const credit = served.filter((r) => r.scheme === 'balance');
