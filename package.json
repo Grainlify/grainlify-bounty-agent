@@ -16,7 +16,8 @@
     "agent": "tsx apps/agent/src/main.ts",
     "cli": "tsx apps/agent/src/cli.ts",
     "approve": "tsx apps/agent/src/cli.ts approve",
-    "payout-signer": "tsx services/signer/src/payout/main.ts"
+    "payout-signer": "tsx services/signer/src/payout/main.ts",
+    "generate:x402-docs": "tsx scripts/generate-x402-errors-doc.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.1",

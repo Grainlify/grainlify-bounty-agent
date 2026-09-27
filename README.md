@@ -41,7 +41,7 @@ This is an entry for the AnsemHack Clawrena (Inference Markets and ClawPump × p
 
 ## x402 on UsePod: what we learned
 
-These findings come from live probes; the full catalogue is in [fixtures/usepod/x402-errors.json](fixtures/usepod/x402-errors.json).
+These findings come from live probes; see the human-readable error reference in [docs/X402-ERRORS.md](docs/X402-ERRORS.md) and the raw catalogue in [fixtures/usepod/x402-errors.json](fixtures/usepod/x402-errors.json).
 
 **The flow.** An unpaid request returns `402` with a base64 JSON quote in `PAYMENT-REQUIRED`. The quote is bound to `sha256("POST\n<path>\n<body>")`. You pay USDC to `pay_to` on Solana, then retry the byte-identical request with `PAYMENT-SIGNATURE`.
 
