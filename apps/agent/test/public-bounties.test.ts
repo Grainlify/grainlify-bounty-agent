@@ -139,11 +139,14 @@ describe('what to publish about a pool', () => {
 });
 
 describe.skipIf(!dbUrl)('the published rules', () => {
+  // Reuses this file's database rather than creating a second. Every
+  // CREATE DATABASE competes with the others running in parallel, and two
+  // unrelated files were timing out at five seconds because of it.
   let db2: pg.Pool;
   let api2: PublicApi;
 
   beforeAll(async () => {
-    db2 = await freshDatabase(dbUrl!, 'test_public_rules');
+    db2 = await freshDatabase(dbUrl!, 'test_public_bounties_rules');
     api2 = new PublicApi(db2, p2Config({ mints: {}, trustedApprovers: [] }));
   });
   afterAll(async () => {

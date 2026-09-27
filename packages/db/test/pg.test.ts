@@ -37,7 +37,12 @@ describe.skipIf(!url)('postgres receipts and spend ledger', () => {
     expect(refused.decision).toMatchObject({ ok: false, code: 'ceiling_reached' });
   });
 
-  it('binds a database to mock or live money once and refuses the other mode', async () => {
+  // Creates two more databases inside the test, because the binding it is
+  // checking is permanent per database and cannot be undone. CREATE DATABASE
+  // serialises in Postgres, so under a parallel run this is slow through no
+  // fault of the code under test - hence the timeout rather than the default
+  // five seconds.
+  it('binds a database to mock or live money once and refuses the other mode', { timeout: 30_000 }, async () => {
     const mockDb = await freshDatabase(url!, 'test_ledger_mode_mock');
     await bindLedgerMode(mockDb, 'mock');
     await bindLedgerMode(mockDb, 'mock'); // idempotent
