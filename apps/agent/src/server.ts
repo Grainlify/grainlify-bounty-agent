@@ -344,6 +344,26 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               applications: await d.draw.applicationsFor(f.subject),
               draws: await d.draw.drawsFor(f.subject),
             });
+          case 'list_repos':
+            return reply(200, { repos: await d.service.repoBountyStates() });
+          case 'set_repo_bounties': {
+            // registeredProject is Grainlify's assertion, carried in the body
+            // of a message this admin signed. This service has no projects
+            // table and cannot check it; what it can do is record who said so.
+            const r = await d.service.setRepoBounties(f.subject, {
+              enabled: body.enabled === true,
+              registeredProject: body.registeredProject === true,
+              changedBy: f.login,
+            });
+            return r.ok ? reply(200, { ...r, repos: await d.service.repoBountyStates() }) : reply(409, { error: r.error, detail: r.detail });
+          }
+          case 'maintainer_view': {
+            // Grainlify has already decided this caller maintains the repo.
+            // What they may SEE is decided here, by the clock, and would be
+            // the same answer however the question were asked.
+            const v = await d.draw.maintainerView(f.subject);
+            return 'error' in v ? reply(404, v) : reply(200, v);
+          }
           case 'run_draw': {
             const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true });
             return 'error' in r ? reply(409, r) : reply(200, r);

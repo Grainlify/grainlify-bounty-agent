@@ -35,6 +35,7 @@ describe.skipIf(!dbUrl)('seeding a bounty', () => {
     service = new BountyService({ db, gh, x402: undefined as never, payoutSigner: {} as never, cfg, now });
     draw = new DrawService({ db, gh, now });
     await service.addRepo('Grainlify/sandbox', true);
+    await service.setRepoBounties('Grainlify/sandbox', { enabled: true, registeredProject: true, changedBy: 'test' });
   });
   afterAll(async () => {
     await db?.end();

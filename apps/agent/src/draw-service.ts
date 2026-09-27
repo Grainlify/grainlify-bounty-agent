@@ -17,7 +17,7 @@
 
 import { randomInt } from 'node:crypto';
 import type pg from 'pg';
-import { boolOf, intOf, isWaivable, DRAW_SETTINGS, validate, withDefaults } from '../../../packages/gate/src/draw-config.ts';
+import { applicantBucket, boolOf, intOf, isWaivable, DRAW_SETTINGS, validate, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { type DrawApplicant, runDraw } from '../../../packages/gate/src/draw.ts';
 import type { FitService } from './fit-service.ts';
 import { fitEnabled } from './fit-service.ts';
@@ -391,6 +391,89 @@ export class DrawService {
     return Object.fromEntries(r.rows.map((x) => [x.bounty_id, { status: x.status, staleAt: new Date(x.stale_at).toISOString() }]));
   }
 
+  /**
+   * What a MAINTAINER may see about a bounty's applications.
+   *
+   * Time-gated, and gated here rather than in the caller. Grainlify decides
+   * whether someone maintains the repo; this decides what a maintainer is
+   * allowed to know, and it must hold even if the caller asks for more.
+   *
+   * While the window is open: a rough count, no names. If a maintainer can
+   * see who applied while applications are still open, applicants can be
+   * leaned on or tipped off, and the whole point of hiding the pool is that
+   * nobody can work the draw.
+   *
+   * After it closes: the full list with each applicant's gate outcome.
+   * Exactness harms nothing once nobody can act on it.
+   *
+   * After the draw: the winner and the ticket breakdown, so a maintainer can
+   * see the result was arithmetic rather than a choice.
+   *
+   * At no point is there anything to act on. A maintainer cannot assign,
+   * reject, or influence the draw, and this returns no handle that would let
+   * them try.
+   */
+  async maintainerView(bountyId: string) {
+    const b = await this.d.db.query<{ applications_close_at: Date | null; issue_number: number; owner: string; name: string }>(
+      `SELECT b.applications_close_at, b.issue_number, r.owner, r.name
+         FROM bounties b JOIN repos r ON r.id = b.repo_id WHERE b.id = $1`,
+      [bountyId],
+    );
+    const row = b.rows[0];
+    if (!row) return { error: 'no_such_bounty', detail: 'that bounty does not exist' };
+
+    const cfg = await this.config();
+    const closesAt = row.applications_close_at ? new Date(row.applications_close_at) : null;
+    const windowOpen = closesAt !== null && closesAt > this.d.now();
+
+    const counted = await this.d.db.query<{ n: string }>(
+      `SELECT count(*) AS n FROM bounty_applications WHERE bounty_id = $1 AND status IN ('applied','won','lost')`,
+      [bountyId],
+    );
+    const total = Number(counted.rows[0]?.n ?? 0);
+
+    const base = {
+      bountyId,
+      repo: `${row.owner}/${row.name}`,
+      issueNumber: row.issue_number,
+      windowOpen,
+      applicationsCloseAt: closesAt ? closesAt.toISOString() : null,
+      // Stated on every response, so the UI never has to infer it and a
+      // maintainer is never left wondering whether a button is missing or
+      // merely not rendered.
+      canAssign: false as const,
+      assignmentIsByDraw: true as const,
+    };
+
+    if (windowOpen) {
+      return {
+        ...base,
+        ...poolVisibilityForMaintainer(total, cfg.applicant_count_visibility ?? 'bucketed'),
+        applications: null,
+        draw: null,
+      };
+    }
+
+    const view = await this.applicationsFor(bountyId);
+    const draws = await this.drawsFor(bountyId);
+    const real = draws.find((d) => d.simulation === false) ?? null;
+    return {
+      ...base,
+      applicantBucket: null,
+      applicantCount: total,
+      applications: view.applications.map((a) => ({
+        githubLogin: a.githubLogin,
+        status: a.status,
+        gateFailureReason: a.gateFailureReason,
+        fit: a.fit,
+        appliedAt: a.appliedAt,
+      })),
+      draw: real
+        ? { winnerLogin: real.winnerLogin, seed: real.seed, ranAt: real.ranAt, pool: real.pool, noWinnerReason: real.noWinnerReason }
+        : null,
+    };
+  }
+
   // --------------------------------------------------------------- the draw
 
   /** History that feeds the weights, for every applicant in one query. */
@@ -630,4 +713,22 @@ export class DrawService {
     }
     return { drawn, extended, skipped };
   }
+}
+
+
+/**
+ * A maintainer's view of an open pool: the same coarse band contributors get,
+ * never the exact number and never the names.
+ *
+ * 'exact' is deliberately NOT honoured here while the window is open. That
+ * setting is about what the PUBLIC page shows; a maintainer has influence
+ * over the repository and therefore over applicants, so the reason to keep
+ * the pool coarse applies to them more strongly, not less.
+ */
+export function poolVisibilityForMaintainer(
+  total: number,
+  visibility: string,
+): { applicantBucket: 'none' | 'few' | 'many' | null; applicantCount: number | null } {
+  if (visibility === 'hidden') return { applicantBucket: null, applicantCount: null };
+  return { applicantBucket: applicantBucket(total), applicantCount: null };
 }

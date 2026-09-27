@@ -15,7 +15,7 @@ const policy: GatePolicy = {
 
 function facts(over: Partial<GateFacts['bounty']> = {}, paidTodayMinor = 0n): GateFacts {
   return {
-    repo: { fullName: 'Grainlify/grainlify-bounty-agent', allowlisted: true, enabled: true },
+    repo: { fullName: 'Grainlify/grainlify-bounty-agent', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: true },
     // ~5.21 ANSEM is about $1 at roughly $0.19 a token.
     bounty: { id: 'b1', status: 'in_review', issueNumber: 3, amountMinor: 5_210_000n, currency: 'ANSEM', network: 'solana-mainnet', ...over },
     pr: { number: 7, merged: true, mergedByLogin: 'maintainer', mergedByPermission: 'admin', authorId: 42, authorLogin: 'contributor', authorType: 'User', closesIssues: [3] },

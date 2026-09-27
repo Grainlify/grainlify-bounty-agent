@@ -60,8 +60,8 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
     gh = new FakeGitHub();
     svc = new DrawService({ db, gh, now: () => now });
     await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, wallet_links, bounties, contributors, bounty_config CASCADE');
-    await db.query(`INSERT INTO repos (owner, name, enabled) VALUES ('Grainlify','test-repo', true)
-                    ON CONFLICT (owner, name) DO UPDATE SET enabled = true RETURNING id`);
+    await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
+                    ON CONFLICT (owner, name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true RETURNING id`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;
   });
   afterAll(async () => {

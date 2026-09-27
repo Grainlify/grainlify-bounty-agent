@@ -31,7 +31,8 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
   });
   beforeEach(async () => {
     await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, bounties CASCADE');
-    await db.query(`INSERT INTO repos (owner, name, enabled) VALUES ('Grainlify','test-repo', true) ON CONFLICT (owner,name) DO UPDATE SET enabled = true`);
+    await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
+                    ON CONFLICT (owner,name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;
   });
   afterAll(async () => {
@@ -189,11 +190,13 @@ describe.skipIf(!dbUrl)('the published rules', () => {
     expect(r.structural.neverWeightedNote).toContain('no code path');
   });
 
-  it('answers on an empty database, because defaults live in code', async () => {
-    const fresh = await freshDatabase(dbUrl!, 'test_public_rules_empty');
-    const r = await new PublicApi(fresh, p2Config({ mints: {}, trustedApprovers: [] })).rules();
+  it('answers with no overrides stored, because defaults live in code', async () => {
+    // Was creating a whole database to assert this. That is the same claim as
+    // "the settings table is empty", and spinning one up mid-test added a
+    // CREATE/DROP to a parallel run that made two unrelated files flaky.
+    await db2.query('TRUNCATE bounty_config');
+    const r = await api2.rules();
     expect(r.settings.every((s) => !s.overridden)).toBe(true);
     expect(r.settings.length).toBeGreaterThan(10);
-    await fresh.end();
   });
 });

@@ -9,6 +9,7 @@
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { verifyApproval, type Approval, type PayoutTerms } from '../../../packages/gate/src/approval.ts';
+import { isTestCarveOut, repoMayHaveBounties } from '../../../packages/gate/src/bounty-repos.ts';
 import { evaluateGate, type GateFacts, type GateResult } from '../../../packages/gate/src/gate.ts';
 import { parseAndVerifyLinkComment } from '../../../packages/gate/src/link.ts';
 import { verifySessionLink, type SessionLinkRefusal } from '../../../packages/gate/src/session-link.ts';
@@ -70,7 +71,82 @@ export class BountyService {
   async repo(fullName: string) {
     const [owner, name] = fullName.split('/');
     const r = await this.d.db.query(`SELECT * FROM repos WHERE lower(owner) = lower($1) AND lower(name) = lower($2)`, [owner, name]);
-    return (r.rows[0] as { id: string; owner: string; name: string; enabled: boolean } | undefined) ?? null;
+    return (r.rows[0] as { id: string; owner: string; name: string; enabled: boolean; bounties_enabled: boolean; registered_project: boolean } | undefined) ?? null;
+  }
+
+  /**
+   * Switches bounties on or off for a repository, and records who did it.
+   *
+   * `registeredProject` is asserted by Grainlify, not determined here: this
+   * service has no projects table and should not grow one. It is written on
+   * every change rather than only when enabling, so a project losing its
+   * verification takes its bounties with it without anybody having to
+   * remember a second switch.
+   */
+  async setRepoBounties(fullName: string, o: { enabled: boolean; registeredProject: boolean; changedBy: string }) {
+    const repo = await this.repo(fullName);
+    if (!repo) return { ok: false as const, error: 'repo_not_allowlisted', detail: `${fullName} is not allowlisted with the bounty agent` };
+    await this.d.db.query(
+      `UPDATE repos SET bounties_enabled = $2, registered_project = $3 WHERE id = $1`,
+      [repo.id, o.enabled, o.registeredProject],
+    );
+    await this.d.db.query(
+      `INSERT INTO repo_bounty_audit (repo_id, full_name, bounties_enabled, registered_project, changed_by)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [repo.id, `${repo.owner}/${repo.name}`, o.enabled, o.registeredProject, o.changedBy],
+    );
+    return { ok: true as const, fullName: `${repo.owner}/${repo.name}`, bountiesEnabled: o.enabled, registeredProject: o.registeredProject };
+  }
+
+  /** Every allowlisted repo and its bounty state, for the admin screen. */
+  async repoBountyStates() {
+    const r = await this.d.db.query<{
+      id: string; owner: string; name: string; enabled: boolean; bounties_enabled: boolean; registered_project: boolean;
+      changed_by: string | null; changed_at: Date | null;
+    }>(
+      `SELECT r.id, r.owner, r.name, r.enabled, r.bounties_enabled, r.registered_project,
+              a.changed_by, a.changed_at
+         FROM repos r
+         LEFT JOIN LATERAL (
+           SELECT changed_by, changed_at FROM repo_bounty_audit
+            WHERE full_name = r.owner || '/' || r.name ORDER BY changed_at DESC LIMIT 1
+         ) a ON true
+        ORDER BY r.owner, r.name`,
+    );
+    return r.rows.map((x) => {
+      const fullName = `${x.owner}/${x.name}`;
+      const verdict = repoMayHaveBounties({
+        fullName,
+        enabled: x.enabled,
+        bountiesEnabled: x.bounties_enabled,
+        registeredProject: x.registered_project,
+      });
+      return {
+        fullName,
+        allowlisted: x.enabled,
+        bountiesEnabled: x.bounties_enabled,
+        registeredProject: x.registered_project,
+        testCarveOut: isTestCarveOut(fullName),
+        mayHaveBounties: verdict.ok,
+        whyNot: verdict.ok ? null : verdict.detail,
+        lastChangedBy: x.changed_by,
+        lastChangedAt: x.changed_at ? new Date(x.changed_at).toISOString() : null,
+      };
+    });
+  }
+
+  /** Refuses with the operator-readable reason, or returns the repo row. */
+  private async repoForBounty(fullName: string) {
+    const repo = await this.repo(fullName);
+    if (!repo) throw new Error(`${fullName} is not allowlisted; run: agent repo add ${fullName}`);
+    const v = repoMayHaveBounties({
+      fullName,
+      enabled: repo.enabled,
+      bountiesEnabled: repo.bounties_enabled === true,
+      registeredProject: repo.registered_project === true,
+    });
+    if (!v.ok) throw new Error(v.detail);
+    return repo;
   }
 
   async addRepo(fullName: string, enabled: boolean) {
@@ -248,8 +324,7 @@ export class BountyService {
     reservedForNewcomers?: boolean;
   }): Promise<{ bountyId: string; title: string }> {
     const fullName = input.repo;
-    const repo = await this.repo(fullName);
-    if (!repo) throw new Error(`${fullName} is not allowlisted; run: agent repo add ${fullName}`);
+    const repo = await this.repoForBounty(fullName);
     const currency = input.currency ?? this.d.cfg.defaultCurrency;
     const mint = this.d.cfg.mints[currency];
     if (!mint) throw new Error(`no mint configured for ${currency} on ${this.d.cfg.network}`);
@@ -474,7 +549,13 @@ export class BountyService {
       ),
     ]);
     const facts: GateFacts = {
-      repo: { fullName, allowlisted: true, enabled: repo.enabled },
+      repo: {
+        fullName,
+        allowlisted: true,
+        enabled: repo.enabled,
+        bountiesEnabled: (repo as { bounties_enabled?: boolean }).bounties_enabled === true,
+        registeredProject: (repo as { registered_project?: boolean }).registered_project === true,
+      },
       bounty: { id: String(b.id), status: String(b.status), issueNumber: Number(b.issue_number), amountMinor: BigInt(String(b.amount_minor)), currency: String(b.currency), network: String(b.network) },
       pr: {
         number: pr.number, merged: pr.merged, mergedByLogin: pr.mergedByLogin, mergedByPermission, authorId: pr.authorId, authorLogin: pr.authorLogin,

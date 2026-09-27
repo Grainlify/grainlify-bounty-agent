@@ -33,7 +33,11 @@ const MESSAGE = new RegExp(
     '^Grainlify: (apply for a bounty|admin action)',
     'Action: ([a-z][a-z0-9_]{0,63})',
     'GitHub: ([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})) \\(id ([1-9][0-9]{0,15})\\)',
-    'Subject: ([A-Za-z0-9_.:-]{0,128})',
+    // '/' is here so a subject can be a repository name (Owner/name). It
+    // cannot terminate a line, so the property this class exists to protect -
+    // that nothing a caller supplies can add a line to a signed message - is
+    // unchanged. A newline or carriage return still fails to parse.
+    'Subject: ([A-Za-z0-9_.:/-]{0,128})',
     'Nonce: ([0-9a-f]{32})',
     'Issued: (\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z)',
     'Expires: (\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z)$',

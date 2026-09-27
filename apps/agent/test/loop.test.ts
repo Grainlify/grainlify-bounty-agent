@@ -123,6 +123,7 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     gh.permissions.set(`${REPO.toLowerCase()}:maintainer`, 'admin');
     gh.permissions.set(`${REPO.toLowerCase()}:contributor`, 'read');
     await service.addRepo(REPO, true);
+    await service.setRepoBounties(REPO, { enabled: true, registeredProject: true, changedBy: 'test' });
   });
 
   afterAll(async () => {

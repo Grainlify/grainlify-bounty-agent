@@ -10,7 +10,7 @@ const policy: GatePolicy = {
 
 function facts(over: Partial<{ [K in keyof GateFacts]: Partial<GateFacts[K]> | GateFacts[K] }> = {}): GateFacts {
   const base: GateFacts = {
-    repo: { fullName: 'Grainlify/grainlify-agent-sandbox', allowlisted: true, enabled: true },
+    repo: { fullName: 'Grainlify/grainlify-agent-sandbox', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: false },
     bounty: { id: 'b1', status: 'in_review', issueNumber: 3, amountMinor: 20_000_000n, currency: 'USDC', network: 'solana-devnet' },
     pr: { number: 7, merged: true, mergedByLogin: 'maintainer', mergedByPermission: 'admin', authorId: 42, authorLogin: 'contributor', authorType: 'User', closesIssues: [3] },
     author: { createdAt: new Date('2020-01-01T00:00:00Z') },
@@ -108,5 +108,39 @@ describe('only the contributor who won the draw can be paid', () => {
 
     const impostor = facts({ assignment: { githubUserId: 77, githubLogin: 'contributor' } });
     expect(evaluateGate(impostor, policy, now).checks.find((c) => c.name === 'assigned_to_author')).toMatchObject({ pass: false });
+  });
+});
+
+describe('only a registered project, switched on, can pay a bounty', () => {
+  // Checked here as well as when the bounty was created. A project can be
+  // switched off, or lose its verification, in the weeks between a bounty
+  // being posted and a pull request being merged - and this is the check that
+  // runs at the moment money would actually move.
+  it('passes for the sandbox, which is the one carve-out', () => {
+    expect(evaluateGate(facts(), policy, now).checks.find((c) => c.name === 'repo_may_have_bounties')).toMatchObject({ pass: true });
+  });
+
+  it('passes for a verified project with bounties on', () => {
+    const r = facts({ repo: { fullName: 'Grainlify/Grainlify-Backend', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: true } });
+    expect(evaluateGate(r, policy, now).checks.find((c) => c.name === 'repo_may_have_bounties')).toMatchObject({ pass: true });
+  });
+
+  it('refuses a repo somebody switched off after the bounty was posted', () => {
+    const r = facts({ repo: { fullName: 'Grainlify/Grainlify-Backend', allowlisted: true, enabled: true, bountiesEnabled: false, registeredProject: true } });
+    const c = evaluateGate(r, policy, now).checks.find((x) => x.name === 'repo_may_have_bounties')!;
+    expect(c.pass).toBe(false);
+    expect(c.detail).toContain('switched off');
+  });
+
+  it('refuses a repo that is not a registered project and not the sandbox', () => {
+    const r = facts({ repo: { fullName: 'Someone/random-repo', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: false } });
+    const c = evaluateGate(r, policy, now).checks.find((x) => x.name === 'repo_may_have_bounties')!;
+    expect(c.pass).toBe(false);
+    expect(c.detail).toContain('verified Grainlify project');
+  });
+
+  it('fails the whole gate, not just the one check', () => {
+    const r = facts({ repo: { fullName: 'Someone/random-repo', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: false } });
+    expect(evaluateGate(r, policy, now).pass).toBe(false);
   });
 });

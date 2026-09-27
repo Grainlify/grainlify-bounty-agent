@@ -13,7 +13,7 @@ describe('mainnet payout switch', () => {
     const cfg = p2Config({ mints: {}, trustedApprovers: [] });
     const r = evaluateGate(
       {
-        repo: { fullName: 'a/b', allowlisted: true, enabled: true },
+        repo: { fullName: 'a/b', allowlisted: true, enabled: true, bountiesEnabled: true, registeredProject: true },
         bounty: { id: 'b', status: 'in_review', issueNumber: 1, amountMinor: 1_000_000n, currency: 'USDC', network: 'solana-mainnet' },
         pr: { number: 2, merged: true, mergedByLogin: 'm', mergedByPermission: 'admin', authorId: 1, authorLogin: 'c', authorType: 'User', closesIssues: [1] },
         author: { createdAt: new Date('2020-01-01') }, wallet: { address: 'w' },

@@ -6,10 +6,12 @@
 // result shown to the approver is complete. Missing or unreadable facts FAIL
 // the check: "could not verify" is never treated as "fine".
 
+import { repoMayHaveBounties } from './bounty-repos.ts';
+
 export type RepoPermission = 'admin' | 'maintain' | 'write' | 'triage' | 'read' | 'none';
 
 export interface GateFacts {
-  repo: { fullName: string; allowlisted: boolean; enabled: boolean };
+  repo: { fullName: string; allowlisted: boolean; enabled: boolean; bountiesEnabled: boolean; registeredProject: boolean };
   bounty: { id: string; status: string; issueNumber: number; amountMinor: bigint; currency: string; network: string };
   /** Fetched fresh from GitHub at gate time, never taken from a webhook payload. */
   pr: {
@@ -68,6 +70,18 @@ export function evaluateGate(f: GateFacts, p: GatePolicy, now: Date): GateResult
   const check = (name: string, pass: boolean, detail: string) => checks.push({ name, pass, detail });
 
   check('repo_allowlisted', f.repo.allowlisted && f.repo.enabled, `${f.repo.fullName}: allowlisted=${f.repo.allowlisted}, enabled=${f.repo.enabled}`);
+  // Checked again here, having already been checked when the bounty was
+  // created. Deliberately not "already validated upstream": a project can be
+  // switched off, or lose its verification, between a bounty being posted and
+  // a pull request being merged weeks later - and this is the check that runs
+  // at the moment money would actually move.
+  const repoVerdict = repoMayHaveBounties({
+    fullName: f.repo.fullName,
+    enabled: f.repo.allowlisted && f.repo.enabled,
+    bountiesEnabled: f.repo.bountiesEnabled,
+    registeredProject: f.repo.registeredProject,
+  });
+  check('repo_may_have_bounties', repoVerdict.ok, repoVerdict.detail);
   check('bounty_open', f.bounty.status === 'posted' || f.bounty.status === 'in_review', `bounty status is ${f.bounty.status}`);
   check('network_allowed', p.allowedNetworks.includes(f.bounty.network), `network ${f.bounty.network}; allowed: ${p.allowedNetworks.join(', ') || 'none'}`);
 
