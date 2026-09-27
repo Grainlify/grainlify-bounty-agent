@@ -15,6 +15,7 @@ export interface SpendEntry {
   reservedMicro: number;
   amountMicro: number | null;
   feeMicro: number | null;
+  feeLamports?: number | null;
   txSignature: string | null;
   createdAt: Date;
   settledAt: Date | null;
@@ -23,6 +24,7 @@ export interface SpendEntry {
 export interface Settlement {
   amountMicro: number;
   feeMicro: number;
+  feeLamports?: number | null;
   txSignature: string | null;
 }
 
@@ -67,7 +69,7 @@ export class InMemorySpendLedger implements SpendLedger {
     const id = `spend-${++this.seq}`;
     this.rows.push({
       id, callId: req.callId, phase: req.phase, kind: req.kind, status: 'reserved', reservedMicro: req.amountMicro,
-      amountMicro: null, feeMicro: null, txSignature: null, createdAt: new Date(), settledAt: null,
+      amountMicro: null, feeMicro: null, feeLamports: null, txSignature: null, createdAt: new Date(), settledAt: null,
     });
     return { decision, entryId: id };
   }
@@ -75,7 +77,7 @@ export class InMemorySpendLedger implements SpendLedger {
   async settle(entryId: string, s: Settlement) {
     const row = this.mustGet(entryId);
     if (row.status !== 'reserved') throw new Error(`spend ${entryId} is ${row.status}, not reserved`);
-    Object.assign(row, { status: 'settled', amountMicro: s.amountMicro, feeMicro: s.feeMicro, txSignature: s.txSignature, settledAt: new Date() });
+    Object.assign(row, { status: 'settled', amountMicro: s.amountMicro, feeMicro: s.feeMicro, feeLamports: s.feeLamports ?? null, txSignature: s.txSignature, settledAt: new Date() });
   }
 
   async release(entryId: string) {

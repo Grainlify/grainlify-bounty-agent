@@ -50,13 +50,13 @@ const COLS: [keyof InferenceCallRecord, string][] = [
   ['id', 'id'], ['purpose', 'purpose'], ['phase', 'phase'], ['model', 'model'], ['path', 'path'], ['links', 'links'],
   ['routingRequested', 'routing_requested'], ['maxTokens', 'max_tokens'], ['requestSha256', 'request_sha256'], ['status', 'status'],
   ['quoteId', 'quote_id'], ['quoteCapMicro', 'quote_cap_micro'], ['quoteExpiresAt', 'quote_expires_at'], ['scheme', 'scheme'],
-  ['payerWallet', 'payer_wallet'], ['payTxSignature', 'pay_tx_signature'], ['paidMicro', 'paid_micro'], ['feeMicro', 'fee_micro'],
+  ['payerWallet', 'payer_wallet'], ['payTxSignature', 'pay_tx_signature'], ['paidMicro', 'paid_micro'], ['feeMicro', 'fee_micro'], ['feeLamports', 'fee_lamports'],
   ['chargedMicro', 'charged_micro'], ['paymentResponseRaw', 'payment_response_raw'], ['paymentResponse', 'payment_response'],
   ['responseHeaders', 'response_headers'], ['responseSha256', 'response_sha256'], ['usageIn', 'usage_in'], ['usageOut', 'usage_out'],
   ['latencyMs', 'latency_ms'], ['error', 'error'], ['createdAt', 'created_at'],
 ];
 const JSON_COLS = new Set(['links', 'routing_requested', 'payment_response', 'response_headers']);
-const NUM_COLS = new Set(['quote_cap_micro', 'paid_micro', 'fee_micro', 'charged_micro']);
+const NUM_COLS = new Set(['quote_cap_micro', 'paid_micro', 'fee_micro', 'charged_micro', 'fee_lamports']);
 
 function toRow(rec: Partial<InferenceCallRecord>) {
   const cols: string[] = [];
@@ -115,6 +115,7 @@ function toEntry(r: Record<string, unknown>): SpendEntry {
   return {
     id: String(r.id), callId: (r.call_id as string | null) ?? null, phase: r.phase as Phase, kind: r.kind as SpendEntry['kind'],
     status: r.status as SpendEntry['status'], reservedMicro: Number(r.reserved_micro), amountMicro: n(r.amount_micro), feeMicro: n(r.fee_micro),
+    feeLamports: n(r.fee_lamports),
     txSignature: (r.tx_signature as string | null) ?? null, createdAt: r.created_at as Date, settledAt: (r.settled_at as Date | null) ?? null,
   };
 }
@@ -150,8 +151,8 @@ export class PgSpendLedger implements SpendLedger {
 
   async settle(entryId: string, s: Settlement) {
     const r = await this.pool.query(
-      `UPDATE inference_spend SET status = 'settled', amount_micro = $2, fee_micro = $3, tx_signature = $4, settled_at = now() WHERE id = $1 AND status = 'reserved'`,
-      [entryId, s.amountMicro, s.feeMicro, s.txSignature],
+      `UPDATE inference_spend SET status = 'settled', amount_micro = $2, fee_micro = $3, fee_lamports = $4, tx_signature = $5, settled_at = now() WHERE id = $1 AND status = 'reserved'`,
+      [entryId, s.amountMicro, s.feeMicro, s.feeLamports ?? null, s.txSignature],
     );
     if (r.rowCount !== 1) throw new Error(`spend ${entryId} is not reserved`);
   }
