@@ -24,7 +24,7 @@ export interface PayQuoteRequest {
 }
 
 export type PayResult =
-  | { ok: true; payer_wallet: string; signature: string; amount_micro: number; fee_lamports: number; fee_micro: number }
+  | { ok: true; payer_wallet: string; signature: string; amount_micro: number; fee_lamports: number | null; fee_micro: number }
   | { ok: false; status: number; error: string };
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -86,7 +86,10 @@ export class Signer {
       const ex = reservation.existing;
       if (ex?.status === 'confirmed' && ex.tx_signature) {
         // Idempotent replay of a payment that already landed: hand back the same proof, pay nothing.
-        return { ok: true, payer_wallet: this.address(), signature: ex.tx_signature, amount_micro: ex.amount_micro, fee_lamports: 0, fee_micro: ex.fee_micro ?? 0 };
+        // The fee for *this* call is not a measurement -- no new transaction was
+        // made and the journal keeps only the fee in micro-USD -- so report it
+        // as unknown (null) rather than a false 0 lamports.
+        return { ok: true, payer_wallet: this.address(), signature: ex.tx_signature, amount_micro: ex.amount_micro, fee_lamports: null, fee_micro: ex.fee_micro ?? 0 };
       }
       return refuse(reservation.reason, ex ? 409 : 403);
     }

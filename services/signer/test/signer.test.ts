@@ -86,6 +86,10 @@ describe('signer policy', () => {
     const a = await signer.payQuote(r);
     const b = await signer.payQuote(r);
     expect(a.ok && b.ok && a.signature === b.signature).toBe(true);
+    // The first payment is a real measurement; the replay made no transaction,
+    // so its fee is unknown, never a false 0 lamports.
+    expect(a).toMatchObject({ fee_lamports: 5_010 });
+    expect(b).toMatchObject({ fee_lamports: null });
     expect(rail.sent).toHaveLength(1);
   });
 

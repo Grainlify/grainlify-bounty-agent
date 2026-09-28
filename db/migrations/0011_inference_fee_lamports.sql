@@ -1,0 +1,11 @@
+-- The exact network fee the transaction cost, in lamports.
+--
+-- fee_micro sits beside this and stays exactly what it was: the fee converted
+-- at solUsdCeilingPrice ($400), deliberately high so the budget can never
+-- under-count spend. That number is a cap, not a measurement.
+--
+-- This column is the measurement. The signer already reads res.feeLamports
+-- from the confirmed transaction; keeping it turns the receipt from a
+-- conservative estimate into a factual record. It is nullable because rows
+-- written before this migration never had the figure, and remains valid.
+ALTER TABLE inference_calls ADD COLUMN fee_lamports BIGINT;
