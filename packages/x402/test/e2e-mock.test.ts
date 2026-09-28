@@ -66,6 +66,9 @@ describe('x402 end to end against the mock gateway', () => {
     expect(record.quoteId).toMatch(/^[0-9a-f-]{36}$/);
     expect(record.payTxSignature).toBeTruthy();
     expect(record.paidMicro).toBe(record.quoteCapMicro);
+    // The exact fee the confirmed transaction cost is kept beside the ceiling estimate.
+    expect(record.feeLamports).toBe(5_000);
+    expect(record.feeMicro).toBe(2_000); // 5000 lamports at $400/SOL, rounded up
     expect(record.paymentResponse).toMatchObject({ quote_id: record.quoteId, scheme: 'onchain' });
     expect(record.usageOut).toBeGreaterThan(0);
     expect((response as { choices: { message: { content: string } }[] }).choices[0]!.message.content).toContain('gpt-oss-120b');
@@ -88,7 +91,7 @@ describe('x402 end to end against the mock gateway', () => {
     const spentAfterFirst = (await h.ledger.totals()).lifetimeMicro;
 
     const second = await h.client.call(chat('second'));
-    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, payTxSignature: null });
+    expect(second.record).toMatchObject({ status: 'served', scheme: 'balance', paidMicro: 0, feeMicro: 0, feeLamports: 0, payTxSignature: null });
     expect((await h.ledger.totals()).lifetimeMicro).toBe(spentAfterFirst);
     expect(h.journal.all()).toHaveLength(1);
   });
@@ -114,7 +117,7 @@ describe('x402 end to end against the mock gateway', () => {
       balanceProof: (q) => real.balanceProof(q),
       payQuote: async (rail) => {
         capSeen = rail.amount_microunits;
-        return { kind: 'paid', payer_wallet: 'HKMMpctYvofRCSF2uGnqfEGWcmMhD8A86xFqgmWTvcq9', signature: 'sig-overpaid', amount_micro: rail.amount_microunits + 20_000, fee_micro: 2_000 };
+        return { kind: 'paid', payer_wallet: 'HKMMpctYvofRCSF2uGnqfEGWcmMhD8A86xFqgmWTvcq9', signature: 'sig-overpaid', amount_micro: rail.amount_microunits + 20_000, fee_micro: 2_000, fee_lamports: 5_000 };
       },
     };
     const h = await harness({ payer: overpayer });

@@ -48,7 +48,7 @@ describe('signer policy', () => {
   it('pays an allowlisted UsePod quote and journals it', async () => {
     const { signer, rail, journal } = setup();
     const r = await signer.payQuote(req(35));
-    expect(r).toMatchObject({ ok: true, amount_micro: 35, fee_lamports: 5_010 });
+    expect(r).toMatchObject({ ok: true, amount_micro: 35, fee_lamports: 5_010, fee_micro: 2_004 });
     expect(rail.sent).toEqual([{ to: PAY_TO, amountMicro: 35 }]);
     expect(journal.committedMicro()).toBe(35 + 2_004); // 5010 lamports at $400/SOL, rounded up
   });
