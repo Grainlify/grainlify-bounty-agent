@@ -11,7 +11,9 @@
 
 import type pg from 'pg';
 import { budgetConfig, PHASE_ALLOCATION_MICRO, PHASES } from '../../../packages/budget/src/governor.ts';
+import { computeMetrics, costPerMergedPr, type CallRow, type ListPrice } from '../../../packages/budget/src/metrics.ts';
 import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
+import catalog from '../../../fixtures/usepod/marketplace-models.subset.json' with { type: 'json' };
 import { applicantBucket, DRAW_SETTINGS, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
@@ -127,6 +129,18 @@ export interface LedgerEvent {
 }
 
 const shortSig = (s: string) => `${s.slice(0, 5)}…${s.slice(-4)}`;
+
+/**
+ * Cheapest list price per model, from the captured marketplace catalogue the
+ * mock gateway is built on. Used only to answer "what would these tokens have
+ * cost at list price"; a model absent here is simply not priced, never priced
+ * at 0.
+ */
+const listPrices = new Map<string, ListPrice>(
+  catalog.models
+    .filter((m) => m.model_id && m.cheapest_input_per_1m != null && m.cheapest_output_per_1m != null)
+    .map((m) => [m.model_id, { inputPer1m: m.cheapest_input_per_1m, outputPer1m: m.cheapest_output_per_1m }]),
+);
 
 /**
  * What to publish about the pool, given the setting and whether the window
@@ -330,6 +344,50 @@ export class PublicApi {
     }
     events.sort((a, b) => b.at.localeCompare(a.at));
 
+    // What a served call actually cost, and what the same tokens would have
+    // cost at list price. Read over every served call, not just the 200 newest
+    // in `events`: an average over a truncated window is not the project's
+    // average, and the point of the figure is to be checkable.
+    const servedRows = await this.db.query<{
+      scheme: string | null; status: string; model: string;
+      paid_micro: string | number | null; fee_micro: string | number | null; charged_micro: string | number | null;
+      usage_in: number | null; usage_out: number | null;
+      links: { repo?: string; issueNumber?: number } | null;
+    }>(
+      `SELECT scheme, status, model, paid_micro, fee_micro, charged_micro, usage_in, usage_out, links
+       FROM inference_calls WHERE status = 'served'`,
+    );
+    const metricRows: CallRow[] = servedRows.rows.map((r) => ({
+      scheme: r.scheme,
+      status: r.status,
+      model: r.model,
+      paidMicro: r.paid_micro === null ? null : Number(r.paid_micro),
+      feeMicro: r.fee_micro === null ? null : Number(r.fee_micro),
+      chargedMicro: r.charged_micro === null ? null : Number(r.charged_micro),
+      usageIn: r.usage_in,
+      usageOut: r.usage_out,
+      links: r.links,
+    }));
+    // A merged PR is keyed `owner/name#issue`, the same shape the call links
+    // carry. bounties has no `repo` column: the full name lives on repos, so
+    // it is joined here rather than guessed.
+    const merged = await this.db.query<{ repo: string; issue_number: number }>(
+      `SELECT DISTINCT r.owner || '/' || r.name AS repo, b.issue_number
+       FROM submissions s
+       JOIN bounties b ON b.id = s.bounty_id
+       JOIN repos r ON r.id = b.repo_id
+       WHERE s.merged_at IS NOT NULL`,
+    );
+    const mergedKeys = new Set(merged.rows.map((r) => `${r.repo}#${r.issue_number}`));
+    const m = computeMetrics(metricRows, listPrices);
+    const pr = costPerMergedPr(metricRows, mergedKeys);
+    // Counts are real even while mocked -- the calls happened and were served.
+    // Money and its ratios are withheld, exactly as the mock ledger's spend
+    // total above is: the mock gateway records play money and publishing it
+    // would overstate real spend. A figure that cannot be computed is null,
+    // never 0, so "no merged PR yet" never reads as "zero cost per merged PR".
+    const money = (v: number | null) => (mock ? null : v);
+
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();
     const paid = bounties.filter((b) => b.payout);
     return {
@@ -343,6 +401,25 @@ export class PublicApi {
         inferenceSpendMicro: totals ? totals.lifetimeMicro : null,
         inferenceCeilingMicro: 5_000_000,
         feesInMicro: null as number | null, // not tracked until GRAIN launches
+      },
+      inferenceCosts: {
+        // Served calls, split by how they were paid for.
+        servedCalls: m.servedCalls,
+        paidCalls: m.paidCalls,
+        creditCalls: m.creditCalls,
+        mergedPrs: pr.merged,
+        listPriceModels: m.listPriceModels,
+        inferenceMicro: money(m.inferenceMicro),
+        feeMicro: money(m.feeMicro),
+        totalMicro: money(m.totalMicro),
+        feeSharePct: money(m.feeSharePct),
+        feeToInferenceRatio: money(m.feeToInferenceRatio),
+        costPerServedCallMicro: money(m.costPerServedCallMicro),
+        costPerPaidCallMicro: money(m.costPerPaidCallMicro),
+        listPriceMicro: money(m.listPriceMicro),
+        attributedMicro: money(pr.attributedMicro),
+        unattributedMicro: money(pr.unattributedMicro),
+        perMergedPrMicro: money(pr.perMergedMicro),
       },
       budget: PHASES.map((p) => ({ phase: p, allocationMicro: PHASE_ALLOCATION_MICRO[p], spentMicro: totals ? totals.byPhase[p] : 0 })),
       events: events.slice(0, 300),
