@@ -187,3 +187,105 @@ describe('the switch', () => {
     expect(fitEnabled({ ai_fit_assessment_enabled: 'true' })).toBe(true);
   });
 });
+
+// An inference failure must never cost somebody their place in the draw.
+//
+// These pin the property as a whole rather than one of its causes: whatever
+// goes wrong on our side, the applicant ends up 'plausible', which weights 1.0
+// - the same as a successful plausible assessment, and neutral in the draw.
+describe.skipIf(!dbUrl)('an inference failure never costs the applicant', () => {
+  let db: pg.Pool;
+  let gh: FakeGitHub;
+  let repoId: number;
+  const cfg = p2Config({ mints: {}, trustedApprovers: [] });
+
+  const svcWith = (call: ReturnType<typeof vi.fn>) =>
+    new FitService({ db, gh, x402: { call } as never, cfg, now: () => new Date('2026-09-29T10:00:00Z') });
+
+  const application = async () => {
+    const bountyId = randomUUID();
+    await db.query(
+      `INSERT INTO bounties (id, repo_id, issue_number, issue_title, amount_minor, currency, mint, network, status, created_by)
+       VALUES ($1,$2,$3,'Fix the flaky test',1000000,'USDC','m','solana-mainnet','posted','t')`,
+      [bountyId, repoId, Math.floor(Math.random() * 100000)],
+    );
+    const r = await db.query<{ id: string }>(
+      `INSERT INTO bounty_applications (bounty_id, github_user_id, github_login, status) VALUES ($1, 42, 'octo', 'applied') RETURNING id`,
+      [bountyId],
+    );
+    return { bountyId, applicationId: r.rows[0]!.id };
+  };
+
+  const assess = (svc: FitService, ids: { bountyId: string; applicationId: string }) =>
+    svc.assess({
+      ...ids,
+      githubUserId: 42,
+      githubLogin: 'octo',
+      repo: 'Grainlify/test-repo',
+      issue: { title: 'Fix the flaky test', body: '', acceptanceCriteria: '', difficultyTier: 'easy', primaryLanguage: 'TypeScript' },
+      applicationText: '',
+      enabled: true,
+    });
+
+  beforeAll(async () => {
+    db = await freshDatabase(dbUrl!, 'test_fit_fallback');
+  });
+  beforeEach(async () => {
+    gh = new FakeGitHub();
+    await db.query('TRUNCATE bounty_applications, bounties, contributor_snapshots, inference_calls, repos CASCADE');
+    const r = await db.query<{ id: number }>(
+      `INSERT INTO repos (owner, name, installation_id, enabled) VALUES ('Grainlify','test-repo',1,true) RETURNING id`,
+    );
+    repoId = r.rows[0]!.id;
+  });
+  afterAll(async () => {
+    await db?.end();
+  });
+
+  const storedFit = async (applicationId: string) => {
+    const r = await db.query<{ fit: string | null; fit_call_id: string | null }>(
+      `SELECT fit, fit_call_id FROM bounty_applications WHERE id = $1`,
+      [applicationId],
+    );
+    return r.rows[0]!;
+  };
+
+  for (const [label, thrown] of [
+    ['the gateway is down', new Error('fetch failed: ECONNREFUSED')],
+    ['the payment is refused', new Error('balance spend failed: insufficient funds')],
+    ['the lifetime ceiling is reached', new Error('lifetime inference ceiling reached')],
+    ['the call is aborted on its deadline', Object.assign(new Error('The operation was aborted due to timeout'), { name: 'TimeoutError' })],
+  ] as const) {
+    it(`answers plausible when ${label}`, async () => {
+      const ids = await application();
+      const out = await assess(svcWith(vi.fn().mockRejectedValue(thrown)), ids);
+
+      expect(out.assessment.fit).toBe('plausible');
+      expect(out.callId).toBeNull();
+      expect(out.costMicro).toBe(0);
+      expect(out.skipped).toBeTruthy();
+      expect(await storedFit(ids.applicationId)).toMatchObject({ fit: 'plausible' });
+    });
+  }
+
+  it('answers plausible when the model returns something unreadable', async () => {
+    const ids = await application();
+    const svc = svcWith(
+      vi.fn().mockResolvedValue({
+        record: { id: null, paidMicro: 0, feeMicro: 0 },
+        response: { choices: [{ message: { content: 'I am afraid I cannot help with that.' } }] },
+      }),
+    );
+    const out = await assess(svc, ids);
+    expect(out.assessment.fit).toBe('plausible');
+    expect(out.malformed).toBe(true);
+  });
+
+  it('passes a deadline to the gateway, so a silent gateway cannot hang an application', async () => {
+    const ids = await application();
+    const call = vi.fn().mockRejectedValue(new Error('aborted'));
+    await assess(svcWith(call), ids);
+    const signal = call.mock.calls[0][0].signal as AbortSignal | undefined;
+    expect(signal).toBeInstanceOf(AbortSignal);
+  });
+})

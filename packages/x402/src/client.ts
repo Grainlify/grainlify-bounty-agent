@@ -52,6 +52,18 @@ export interface CallRequest {
   body: Record<string, unknown>;
   routing?: RoutingRequest;
   links?: CallLinks;
+  /**
+   * A deadline for the whole call, including the quote, the payment and the
+   * retries after it.
+   *
+   * There was none, so a gateway that accepted the connection and then went
+   * quiet held the request until undici's own default gave up minutes later.
+   * For the fit assessment that matters: it is awaited inside an applicant's
+   * "Apply", so a silent gateway did not degrade the assessment, it hung the
+   * application - and the row was already written, so the person saw a failure
+   * for something that had in fact succeeded.
+   */
+  signal?: AbortSignal;
 }
 
 export interface CallResult {
@@ -147,7 +159,7 @@ export class X402Client {
     const update = (patch: Partial<InferenceCallRecord>) => this.o.receipts.update(record.id, patch);
 
     // 1. Quote.
-    const q = await this.f(url, { method: 'POST', headers, body: raw });
+    const q = await this.f(url, { method: 'POST', headers, body: raw, signal: req.signal });
     if (q.status !== 402) {
       const err = parseGatewayError(q.status, await q.text());
       const rec = await update({ status: 'failed', error: `expected 402, got ${q.status}: ${err.message}`, latencyMs: Date.now() - started });
@@ -164,7 +176,7 @@ export class X402Client {
     // 2a. Surplus credit, if we believe there is enough.
     if (this.surplusEstimateMicro >= rail.amount_microunits) {
       const { payer_wallet, proof } = await this.o.payer.balanceProof(rail.quote_id);
-      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(balanceEnvelope(rail, payer_wallet, proof)) }, body: raw });
+      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': encodeEnvelope(balanceEnvelope(rail, payer_wallet, proof)) }, body: raw, signal: req.signal });
       if (r.ok) return this.finish(record.id, r, { scheme: 'balance', payerWallet: payer_wallet, paidMicro: 0, feeMicro: 0, txSignature: null, cap: rail.amount_microunits }, started);
       const err = parseGatewayError(r.status, await r.text());
       if (!isBalanceInsufficient(err)) {
@@ -218,7 +230,7 @@ export class X402Client {
     // 3. Settle with the gateway. The transaction may take a moment to become visible.
     const env = encodeEnvelope(onchainEnvelope(rail, pay.payer_wallet, pay.signature));
     for (let attempt = 0; ; attempt++) {
-      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': env }, body: raw });
+      const r = await this.f(url, { method: 'POST', headers: { ...headers, 'PAYMENT-SIGNATURE': env }, body: raw, signal: req.signal });
       if (r.ok) return this.finish(record.id, r, { scheme: 'onchain', payerWallet: pay.payer_wallet, paidMicro: pay.amount_micro, feeMicro: pay.fee_micro, txSignature: pay.signature, cap: rail.amount_microunits }, started);
       const err = parseGatewayError(r.status, await r.text());
       if (isTxNotYetVisible(err) && attempt < 8 && !isExpired(rail, this.now())) {

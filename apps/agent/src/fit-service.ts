@@ -18,6 +18,16 @@ import type { ContributorEvidence, GitHubApi } from './github.ts';
 /** §4.3: "refresh if older than 7 days". */
 export const SNAPSHOT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/**
+ * How long the fit call may take before it is abandoned and the applicant is
+ * given 'plausible'.
+ *
+ * A constant rather than a setting: this is a limit on how long somebody waits
+ * for their own Apply to come back, and there is no operator who should be
+ * able to raise it without changing this line.
+ */
+export const FIT_DEADLINE_MS = 25_000;
+
 export interface FitDeps {
   db: pg.Pool;
   gh: GitHubApi;
@@ -123,6 +133,13 @@ export class FitService {
           ],
         },
         links: { bountyId: input.bountyId, applicationId: input.applicationId },
+        // A deadline, because this call is awaited inside somebody's "Apply".
+        // Without one, a gateway that accepts the connection and then says
+        // nothing holds the application open until undici gives up minutes
+        // later - and the applicant sees a failure for a row that was already
+        // written. An abort lands in the catch below and answers 'plausible',
+        // which is the same answer every other failure gets.
+        signal: AbortSignal.timeout(FIT_DEADLINE_MS),
       });
       record = r.record;
       response = r.response;
