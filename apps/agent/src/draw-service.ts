@@ -392,6 +392,47 @@ export class DrawService {
   }
 
   /**
+   * Bounties on repositories this person maintains.
+   *
+   * "Maintains" is decided by GitHub permission, not by whether the repo is a
+   * registered Grainlify project. Those are different questions and the
+   * product was answering the wrong one: the maintainer tab filtered the
+   * bounty list against the caller's Grainlify projects, so a repository they
+   * plainly maintain but have not registered showed nothing at all - which is
+   * exactly what the sandbox does, since it is eligible through the test
+   * carve-out rather than through registration.
+   *
+   * Write, maintain or admin on the repo. Read or triage is not maintaining
+   * it, and neither is being in the org.
+   *
+   * One GitHub call per distinct repository with an open bounty, not per
+   * bounty: the list is small and the answers are per repo.
+   */
+  async bountiesForMaintainer(login: string) {
+    const r = await this.d.db.query<{ id: string; owner: string; name: string; issue_number: number }>(
+      `SELECT b.id, r.owner, r.name, b.issue_number
+         FROM bounties b JOIN repos r ON r.id = b.repo_id
+        WHERE b.status IN ('posted','in_review','payable','paid')
+        ORDER BY b.created_at DESC LIMIT 200`,
+    );
+    const repos = [...new Set(r.rows.map((x) => `${x.owner}/${x.name}`))];
+    const allowed = new Set<string>();
+    for (const repo of repos) {
+      try {
+        const perm = await this.d.gh.permission(repo, login);
+        if (['admin', 'maintain', 'write'].includes(perm)) allowed.add(repo.toLowerCase());
+      } catch {
+        // A non-collaborator is a 404 from GitHub, which is the ordinary
+        // answer here. Treated as "does not maintain it" rather than as an
+        // error, because an error would hide every other repo too.
+      }
+    }
+    return r.rows
+      .filter((x) => allowed.has(`${x.owner}/${x.name}`.toLowerCase()))
+      .map((x) => ({ bountyId: x.id, repo: `${x.owner}/${x.name}`, issueNumber: x.issue_number }));
+  }
+
+  /**
    * What a MAINTAINER may see about a bounty's applications.
    *
    * Time-gated, and gated here rather than in the caller. Grainlify decides

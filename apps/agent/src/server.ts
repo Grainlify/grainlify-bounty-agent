@@ -357,6 +357,9 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             });
             return r.ok ? reply(200, { ...r, repos: await d.service.repoBountyStates() }) : reply(409, { error: r.error, detail: r.detail });
           }
+          case 'maintainer_bounties':
+            // Who maintains what is GitHub's answer, not ours.
+            return reply(200, { bounties: await d.draw.bountiesForMaintainer(f.login) });
           case 'maintainer_view': {
             // Grainlify has already decided this caller maintains the repo.
             // What they may SEE is decided here, by the clock, and would be

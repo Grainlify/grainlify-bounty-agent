@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { freshDatabase } from '../../../packages/db/src/testing.ts';
 import { DrawService, poolVisibilityForMaintainer } from '../src/draw-service.ts';
 import { FakeGitHub } from './fake-github.ts';
@@ -115,6 +115,43 @@ describe.skipIf(!dbUrl)('the maintainer view of a bounty', () => {
 
   it('refuses a bounty that does not exist rather than returning an empty view', async () => {
     expect(await svc.maintainerView(randomUUID())).toMatchObject({ error: 'no_such_bounty' });
+  });
+
+  // The list, as opposed to one bounty. This is what the maintainer tab shows,
+  // and it used to be filtered on the client against the caller's Grainlify
+  // PROJECTS - a different question from what they maintain, which is why a
+  // repository they plainly maintain but have not registered showed nothing.
+  it('lists bounties on repositories the caller maintains, by GitHub permission', async () => {
+    await bounty(open());
+    gh.permissions.set('grainlify/test-repo:maintainer', 'maintain');
+    const mine = await svc.bountiesForMaintainer('maintainer');
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ repo: 'Grainlify/test-repo' });
+  });
+
+  it('does not need the repository to be a registered Grainlify project', async () => {
+    // The sandbox is eligible through the test carve-out, not registration.
+    // Filtering on registration is what hid it.
+    await db.query(`UPDATE repos SET registered_project = false WHERE owner = 'Grainlify'`);
+    await bounty(open());
+    gh.permissions.set('grainlify/test-repo:maintainer', 'admin');
+    expect(await svc.bountiesForMaintainer('maintainer')).toHaveLength(1);
+  });
+
+  it('shows nothing to somebody who only reads the repository', async () => {
+    await bounty(open());
+    gh.permissions.set('grainlify/test-repo:passer-by', 'read');
+    expect(await svc.bountiesForMaintainer('passer-by')).toEqual([]);
+  });
+
+  it('one repository with three bounties costs one permission call, not three', async () => {
+    // The answer is per repository; asking per bounty would spend the rate
+    // limit for nothing.
+    for (let i = 0; i < 3; i++) await bounty(open());
+    const spy = vi.spyOn(gh, 'permission');
+    gh.permissions.set('grainlify/test-repo:maintainer', 'write');
+    expect(await svc.bountiesForMaintainer('maintainer')).toHaveLength(3);
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });
 
