@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { verifyApproval, type Approval, type PayoutTerms } from '../../../packages/gate/src/approval.ts';
 import { isTestCarveOut, repoMayHaveBounties } from '../../../packages/gate/src/bounty-repos.ts';
+import { dedupe, enqueueEvent } from './events.ts';
 import { evaluateGate, type GateFacts, type GateResult } from '../../../packages/gate/src/gate.ts';
 import { parseAndVerifyLinkComment } from '../../../packages/gate/src/link.ts';
 import { verifySessionLink, type SessionLinkRefusal } from '../../../packages/gate/src/session-link.ts';
@@ -496,6 +497,20 @@ export class BountyService {
       [randomUUID(), submissionId, pr.headSha, review.verdict, review.summary, [record.id], ci, posted.id],
     );
     await this.audit('agent', 'review.posted', submissionId, { verdict: review.verdict, call: record.id });
+
+    // The author asked for a review by opening the pull request; telling them
+    // it exists is the other half of that.
+    const author = await this.d.db.query<{ author_github_user_id: string }>(
+      `SELECT author_github_user_id FROM submissions WHERE id = $1`, [submissionId],
+    );
+    if (author.rows[0]) {
+      await enqueueEvent(this.d.db, {
+        kind: 'bounty_review_posted',
+        githubUserId: Number(author.rows[0].author_github_user_id),
+        dedupeKey: dedupe.reviewPosted(String(b.id), pr.number),
+        payload: { bountyId: String(b.id), repo: fullName, pr_number: pr.number, verdict: review.verdict },
+      });
+    }
   }
 
   // --- merge -> gate -------------------------------------------------------
@@ -616,6 +631,24 @@ export class BountyService {
     await this.d.db.query(`UPDATE payouts SET status = 'confirmed', tx_signature = $2, updated_at = now() WHERE id = $1`, [payoutId, res.signature]);
     await this.d.db.query(`UPDATE bounties SET status = 'paid', updated_at = now() WHERE id = $1`, [view.terms.bounty_id]);
     await this.audit('payout-signer', 'payout.confirmed', payoutId, { tx: res.signature });
+    // Emitted after the transaction is confirmed, never on submission: "you
+    // have been paid" must not arrive for a payment that then fails.
+    const paidTo = await this.d.db.query<{ author_github_user_id: string }>(
+      `SELECT s.author_github_user_id FROM payouts p JOIN submissions s ON s.id = p.submission_id WHERE p.id = $1`,
+      [payoutId],
+    );
+    if (paidTo.rows[0]) {
+      await enqueueEvent(this.d.db, {
+        kind: 'bounty_paid',
+        githubUserId: Number(paidTo.rows[0].author_github_user_id),
+        dedupeKey: dedupe.paid(payoutId),
+        payload: {
+          bountyId: view.terms.bounty_id, repo: view.terms.repo, issue_number: view.terms.issue_number,
+          amount_minor: view.terms.amount_minor, currency: this.currencyLabel(view.terms.currency, view.terms.network),
+          txUrl: explorerTx(view.terms.network, res.signature), recipient: view.terms.recipient,
+        },
+      });
+    }
     const mint = Object.values(this.d.cfg.mints).find((m) => m.mint === view.terms.mint);
     await this.d.gh.comment(
       view.terms.repo,

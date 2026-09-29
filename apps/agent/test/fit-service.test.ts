@@ -71,7 +71,7 @@ describe.skipIf(!dbUrl)('buying a fit assessment', () => {
     now = new Date('2026-09-27T10:00:00Z');
     gh = new FakeGitHub();
     gh.users.set('octo', { id: 42, login: 'octo', type: 'User', createdAt: new Date('2020-01-01') });
-    await db.query('TRUNCATE contributor_snapshots, bounty_applications, bounties, inference_calls CASCADE');
+    await db.query('TRUNCATE bounty_events, contributor_snapshots, bounty_applications, bounties, inference_calls CASCADE');
     await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
                     ON CONFLICT (owner,name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;

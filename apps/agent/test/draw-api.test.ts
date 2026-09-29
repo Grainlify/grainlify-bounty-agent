@@ -71,7 +71,7 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
   });
   beforeEach(async () => {
     gh = new FakeGitHub();
-    await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, wallet_links, bounties, contributors, bounty_config, link_nonces CASCADE');
+    await db.query('TRUNCATE bounty_events, bounty_assignments, bounty_draws, bounty_applications, wallet_links, bounties, contributors, bounty_config, link_nonces CASCADE');
     await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
                     ON CONFLICT (owner,name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;

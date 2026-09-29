@@ -78,8 +78,15 @@ export async function wire() {
 
   const fit = new FitService({ db, gh, x402, cfg, now: () => new Date() });
   const draw = new DrawService({ db, gh, fit, now: () => new Date() });
+  // Where contributor notifications go. Unset switches delivery off, loudly.
+  const events = {
+    db,
+    backendUrl: env.BOUNTY_EVENTS_URL?.trim() || undefined,
+    secret: env.BOUNTY_EVENTS_SECRET?.trim() || undefined,
+  };
+  if (events.secret && events.secret.length < 32) throw new Error('BOUNTY_EVENTS_SECRET must be at least 32 characters');
   return {
-    db, gh, service, cfg, draw, linkCountersignKey,
+    db, gh, service, cfg, draw, linkCountersignKey, events,
     webhookSecret: app.webhook_secret,
     publicApi: new PublicApi(db, cfg),
     publicOrigins: publicOrigins(env),

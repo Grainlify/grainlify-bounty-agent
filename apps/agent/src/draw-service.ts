@@ -19,6 +19,7 @@ import { randomInt } from 'node:crypto';
 import type pg from 'pg';
 import { applicantBucket, boolOf, intOf, isWaivable, DRAW_SETTINGS, validate, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { type DrawApplicant, runDraw } from '../../../packages/gate/src/draw.ts';
+import { dedupe, enqueueEvent } from './events.ts';
 import type { FitService } from './fit-service.ts';
 import { fitEnabled } from './fit-service.ts';
 import type { GitHubApi } from './github.ts';
@@ -292,6 +293,13 @@ export class DrawService {
         })
         .catch(() => {});
     }
+    await enqueueEvent(this.d.db, {
+      kind: 'bounty_application_received',
+      githubUserId: input.githubUserId,
+      dedupeKey: dedupe.applicationReceived(input.bountyId, input.githubUserId),
+      payload: { bountyId: input.bountyId, repo, closesAt: new Date(bounty.applications_close_at).toISOString() },
+    });
+
     return {
       ok: true,
       status: 201,
@@ -651,6 +659,31 @@ export class DrawService {
           WHERE bounty_id = $1 AND status IN ('applied','lost')`,
         [bountyId, result.winner.githubUserId],
       );
+
+      // Emitted here rather than by the caller, so the message and the
+      // assignment are written from the same facts and cannot disagree about
+      // who won or when their deadline is.
+      const b2 = await this.d.db.query<{ repo: string; issue_number: number; amount_minor: string; currency: string }>(
+        `SELECT r.owner||'/'||r.name AS repo, b.issue_number, b.amount_minor::text AS amount_minor, b.currency
+           FROM bounties b JOIN repos r ON r.id = b.repo_id WHERE b.id = $1`,
+        [bountyId],
+      );
+      const about = b2.rows[0]!;
+      await enqueueEvent(this.d.db, {
+        kind: 'bounty_draw_won',
+        githubUserId: result.winner.githubUserId,
+        dedupeKey: dedupe.drawWon(bountyId, drawId),
+        payload: { ...about, bountyId, assignmentId, staleAt, drawId },
+      });
+      for (const c of result.pool) {
+        if (c.githubUserId === result.winner.githubUserId) continue;
+        await enqueueEvent(this.d.db, {
+          kind: 'bounty_draw_lost',
+          githubUserId: c.githubUserId,
+          dedupeKey: dedupe.drawLost(bountyId, drawId, c.githubUserId),
+          payload: { ...about, bountyId, drawId },
+        });
+      }
     }
 
     return {
@@ -717,7 +750,45 @@ export class DrawService {
    * weight_per_abandon. A rejected pull request does not, and is not touched
    * here.
    */
-  async releaseStaleAssignments(): Promise<{ released: { bountyId: string; githubLogin: string }[] }> {
+  async releaseStaleAssignments(): Promise<{ released: { bountyId: string; githubLogin: string }[]; warned: string[] }> {
+    // The warning is computed HERE, from the same stale_at and the same clock
+    // that decide the release. Put anywhere else, the two could disagree - and
+    // a warning that says "24 hours left" about an assignment released an hour
+    // ago is worse than no warning.
+    const cfg = await this.config();
+    const warnHours = intOf(cfg.assignment_expiry_warning_hours, 24);
+    const soon = await this.d.db.query<{
+      id: string; bounty_id: string; github_user_id: string; stale_at: Date;
+      repo: string; issue_number: number; amount_minor: string; currency: string;
+    }>(
+      `SELECT a.id, a.bounty_id, a.github_user_id, a.stale_at,
+              r.owner||'/'||r.name AS repo, b.issue_number, b.amount_minor::text AS amount_minor, b.currency
+         FROM bounty_assignments a
+         JOIN bounties b ON b.id = a.bounty_id
+         JOIN repos r ON r.id = b.repo_id
+        WHERE a.status = 'active'
+          AND a.stale_at > $1
+          AND a.stale_at <= $1::timestamptz + ($2 || ' hours')::interval`,
+      [this.d.now().toISOString(), String(warnHours)],
+    );
+    const warned: string[] = [];
+    for (const x of soon.rows) {
+      const hoursLeft = Math.max(1, Math.round((new Date(x.stale_at).getTime() - this.d.now().getTime()) / 3600_000));
+      const fresh = await enqueueEvent(this.d.db, {
+        kind: 'bounty_assignment_expiring',
+        githubUserId: Number(x.github_user_id),
+        // Keyed to the assignment, so a sweep running every minute for a day
+        // warns once rather than fourteen hundred times.
+        dedupeKey: dedupe.assignmentExpiring(x.id),
+        payload: {
+          bountyId: x.bounty_id, repo: x.repo, issue_number: x.issue_number,
+          amount_minor: x.amount_minor, currency: x.currency,
+          staleAt: new Date(x.stale_at).toISOString(), hoursLeft,
+        },
+      });
+      if (fresh) warned.push(x.bounty_id);
+    }
+
     const r = await this.d.db.query<{ bounty_id: string; github_login: string }>(
       `UPDATE bounty_assignments
           SET status = 'released_stale',
@@ -746,7 +817,7 @@ export class DrawService {
         [row.bounty_id, row.github_login],
       );
     }
-    return { released: r.rows.map((x) => ({ bountyId: x.bounty_id, githubLogin: x.github_login })) };
+    return { released: r.rows.map((x) => ({ bountyId: x.bounty_id, githubLogin: x.github_login })), warned };
   }
 
   /**

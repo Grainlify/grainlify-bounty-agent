@@ -59,7 +59,7 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
     now = new Date('2026-09-27T10:00:00Z');
     gh = new FakeGitHub();
     svc = new DrawService({ db, gh, now: () => now });
-    await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, wallet_links, bounties, contributors, bounty_config CASCADE');
+    await db.query('TRUNCATE bounty_events, bounty_assignments, bounty_draws, bounty_applications, wallet_links, bounties, contributors, bounty_config CASCADE');
     await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
                     ON CONFLICT (owner, name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true RETURNING id`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;
@@ -465,6 +465,73 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
     expect(r.drawn).toEqual([b]);
     const live = await db.query(`SELECT 1 FROM bounty_assignments WHERE bounty_id = $1 AND status = 'active'`, [b]);
     expect(live.rowCount).toBe(1);
+  });
+
+  // ------------------------------------------------------------- events
+
+  it('tells the winner they won, once, however often the draw is re-run', async () => {
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 2, 1300);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+
+    const won = await db.query<{ github_user_id: string; payload: Record<string, unknown> }>(
+      `SELECT github_user_id, payload FROM bounty_events WHERE kind = 'bounty_draw_won'`,
+    );
+    expect(won.rowCount).toBe(1);
+    // The message has to carry what to do and by when, not just that they won.
+    expect(won.rows[0]!.payload).toMatchObject({ repo: 'Grainlify/test-repo' });
+    expect(won.rows[0]!.payload.staleAt).toBeDefined();
+    expect(won.rows[0]!.payload.amount_minor).toBe('1000000');
+
+    const lost = await db.query(`SELECT 1 FROM bounty_events WHERE kind = 'bounty_draw_lost'`);
+    expect(lost.rowCount).toBe(1);
+  });
+
+  it('tells an applicant their application was received', async () => {
+    const b = await newBounty();
+    await svc.openApplications(b);
+    const p = await person(1310, 'applicant');
+    await svc.apply({ bountyId: b, githubUserId: p.id, githubLogin: p.login });
+    const r = await db.query(`SELECT 1 FROM bounty_events WHERE kind = 'bounty_application_received' AND github_user_id = 1310`);
+    expect(r.rowCount).toBe(1);
+  });
+
+  it('warns before an assignment lapses, once, from the sweep that would release it', async () => {
+    // The warning and the release read the same stale_at with the same clock,
+    // so they cannot disagree about when the deadline is.
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 1, 1320);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+
+    // 72h deadline, 24h warning: nothing yet at 24h elapsed.
+    now = new Date(now.getTime() + 24 * 3600_000);
+    expect((await svc.releaseStaleAssignments()).warned).toEqual([]);
+
+    // Inside the warning window.
+    now = new Date(now.getTime() + 30 * 3600_000);
+    expect((await svc.releaseStaleAssignments()).warned).toEqual([b]);
+    // Swept again a minute later: still one warning, not two.
+    now = new Date(now.getTime() + 60_000);
+    expect((await svc.releaseStaleAssignments()).warned).toEqual([]);
+
+    const r = await db.query<{ payload: Record<string, unknown> }>(
+      `SELECT payload FROM bounty_events WHERE kind = 'bounty_assignment_expiring'`,
+    );
+    expect(r.rowCount).toBe(1);
+    expect(Number(r.rows[0]!.payload.hoursLeft)).toBeGreaterThan(0);
+  });
+
+  it('does not warn about an assignment that has already been released', async () => {
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 1, 1330);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+    now = new Date(now.getTime() + 80 * 3600_000);
+    const r = await svc.releaseStaleAssignments();
+    expect(r.released).toHaveLength(1);
+    expect(r.warned).toEqual([]);
   });
 
   // --------------------------------------------------------- the scheduler

@@ -84,6 +84,15 @@ export const DRAW_SETTINGS: Setting[] = [
       'If a reserved bounty attracts no newcomers, draw from everyone rather than leaving it unassigned. An unassignable bounty helps nobody, least of all a newcomer.',
   },
   {
+    key: 'assignment_expiry_warning_hours',
+    type: 'int',
+    default: '24',
+    section: 'Assignment',
+    description: 'How long before an assignment lapses to warn the winner. Must leave enough time to actually open a pull request.',
+    min: 1,
+    max: 720,
+  },
+  {
     key: 'block_org_members',
     type: 'bool',
     default: 'true',
