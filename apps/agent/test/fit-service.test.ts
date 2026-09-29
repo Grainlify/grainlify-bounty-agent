@@ -285,7 +285,7 @@ describe.skipIf(!dbUrl)('an inference failure never costs the applicant', () => 
     const ids = await application();
     const call = vi.fn().mockRejectedValue(new Error('aborted'));
     await assess(svcWith(call), ids);
-    const signal = call.mock.calls[0][0].signal as AbortSignal | undefined;
+    const signal = (call.mock.calls[0]?.[0] as { signal?: AbortSignal } | undefined)?.signal;
     expect(signal).toBeInstanceOf(AbortSignal);
   });
 })
