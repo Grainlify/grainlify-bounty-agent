@@ -85,7 +85,34 @@ export class BountyService {
    * remember a second switch.
    */
   async setRepoBounties(fullName: string, o: { enabled: boolean; registeredProject: boolean; changedBy: string }) {
-    const repo = await this.repo(fullName);
+    let repo = await this.repo(fullName);
+
+    // Switching bounties on for a repo this service has never heard of
+    // allowlists it, rather than refusing.
+    //
+    // It used to refuse with repo_not_allowlisted, which made the admin screen
+    // unusable for its whole purpose: it lists Grainlify's verified projects,
+    // and this service only knew about the sandbox, so every single row failed
+    // to switch on and the refusal named a CLI command the admin has no way to
+    // run. A screen whose one button always fails is worse than no screen.
+    //
+    // Allowlisting here is not a weaker check, because addRepo asks GitHub for
+    // the installation and throws when the App is not installed on the repo.
+    // That is the same question `repo add` asks, asked at the moment somebody
+    // actually wants the repo, and it is the answer that matters - Grainlify's
+    // assertion that the project is verified arrives separately, in the signed
+    // message, and is recorded below.
+    if (!repo && o.enabled) {
+      await this.addRepo(fullName, true);
+      repo = await this.repo(fullName);
+    }
+
+    // Switching OFF something we never knew about is already true. Answering
+    // ok here rather than an error keeps the screen honest: the state the
+    // admin asked for is the state that holds.
+    if (!repo && !o.enabled) {
+      return { ok: true as const, fullName, bountiesEnabled: false, registeredProject: o.registeredProject };
+    }
     if (!repo) return { ok: false as const, error: 'repo_not_allowlisted', detail: `${fullName} is not allowlisted with the bounty agent` };
     await this.d.db.query(
       `UPDATE repos SET bounties_enabled = $2, registered_project = $3 WHERE id = $1`,
