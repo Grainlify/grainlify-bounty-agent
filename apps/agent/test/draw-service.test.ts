@@ -391,6 +391,82 @@ describe.skipIf(!dbUrl)('applications and the draw', () => {
     expect(d.reservedForNewcomers).toBe(false);
   });
 
+  // ------------------------------------------------- stale assignments
+
+  it('releases an assignment whose deadline passed with no pull request', async () => {
+    // stale_at was written, displayed and counted in the abandon weight, and
+    // nothing ever acted on it: a winner who went quiet held the bounty for
+    // good, and the bounty could never be drawn again.
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 2, 1200);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+
+    expect((await svc.releaseStaleAssignments()).released).toEqual([]);
+    now = new Date(now.getTime() + 73 * 3600_000);
+    const r = await svc.releaseStaleAssignments();
+    expect(r.released).toHaveLength(1);
+
+    const row = await db.query<{ status: string; counts_as_abandon: boolean; release_reason: string }>(
+      `SELECT status, counts_as_abandon, release_reason FROM bounty_assignments WHERE bounty_id = $1`, [b],
+    );
+    expect(row.rows[0]).toMatchObject({ status: 'released_stale', counts_as_abandon: true });
+    expect(row.rows[0]!.release_reason).toContain('deadline');
+  });
+
+  it('leaves an assignment alone once a pull request exists', async () => {
+    // They answered. A review running past the deadline is the maintainer's
+    // queue, not the contributor's silence.
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 1, 1210);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+    await db.query(`UPDATE bounty_assignments SET status = 'pr_submitted' WHERE bounty_id = $1`, [b]);
+    now = new Date(now.getTime() + 73 * 3600_000);
+    expect((await svc.releaseStaleAssignments()).released).toEqual([]);
+  });
+
+  it('makes the bounty drawable again, and the silence costs them next time', async () => {
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 2, 1220);
+    const first = (await svc.runDrawFor(b, { triggeredBy: 'admin' })) as { winner: { githubLogin: string; githubUserId: number } };
+
+    now = new Date(now.getTime() + 73 * 3600_000);
+    await svc.releaseStaleAssignments();
+    // Refused before the release; allowed after it.
+    const second = (await svc.runDrawFor(b, { triggeredBy: 'admin', simulate: true })) as { pool: { githubLogin: string; weights: Record<string, number> }[] };
+    const wasSilent = second.pool.find((c) => c.githubLogin === first.winner.githubLogin)!;
+    expect(wasSilent.weights.per_abandon).toBe(0.5);
+  });
+
+  it('the sweep releases even when the automatic draw is switched off', async () => {
+    // A deadline that only applies when a setting is on is not a deadline.
+    await svc.setSetting('auto_draw_enabled', 'false', 'admin');
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 1, 1230);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+    now = new Date(now.getTime() + 73 * 3600_000);
+    const r = await svc.closeDueWindows();
+    expect(r.released).toEqual([b]);
+    expect(r.drawn).toEqual([]);
+  });
+
+  it('a released bounty is picked up by the next automatic sweep', async () => {
+    const b = await newBounty();
+    await svc.openApplications(b);
+    await poolOf(b, 2, 1240);
+    await svc.runDrawFor(b, { triggeredBy: 'admin' });
+    now = new Date(now.getTime() + 73 * 3600_000);
+
+    const r = await svc.closeDueWindows();
+    expect(r.released).toEqual([b]);
+    expect(r.drawn).toEqual([b]);
+    const live = await db.query(`SELECT 1 FROM bounty_assignments WHERE bounty_id = $1 AND status = 'active'`, [b]);
+    expect(live.rowCount).toBe(1);
+  });
+
   // --------------------------------------------------------- the scheduler
 
   it('draws automatically when a window has closed', async () => {

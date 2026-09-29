@@ -23,8 +23,8 @@ export function startDrawScheduler(draw: DrawService, tickMs = DRAW_TICK_MS, log
     running = true;
     try {
       const r = await draw.closeDueWindows();
-      if (r.drawn.length || r.extended.length || r.skipped.length) {
-        log(`draw sweep: drawn=${r.drawn.length} extended=${r.extended.length} skipped=${r.skipped.length}`);
+      if (r.drawn.length || r.extended.length || r.skipped.length || r.released.length) {
+        log(`draw sweep: drawn=${r.drawn.length} extended=${r.extended.length} skipped=${r.skipped.length} released=${r.released.length}`);
       }
     } catch (e) {
       log(`draw sweep failed, will retry: ${e instanceof Error ? e.message : String(e)}`);

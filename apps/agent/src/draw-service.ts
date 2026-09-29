@@ -657,6 +657,58 @@ export class DrawService {
   // ----------------------------------------------------------- the scheduler
 
   /**
+   * Releases assignments whose deadline has passed with no pull request.
+   *
+   * stale_at has been written on every assignment since the draw was built,
+   * shown to the winner, shown to maintainers, and counted in the abandon
+   * weight - and nothing ever acted on it. So the deadline was advisory: a
+   * winner who went quiet held the bounty indefinitely, and because
+   * runDrawFor refuses while a live assignment exists, the bounty could never
+   * be drawn again. assignment_stale_hours and weight_per_abandon were both
+   * inert as a result, which is the same shape of gap the fit weights had
+   * before Layer 2 existed: a setting the page publishes and nothing reads.
+   *
+   * Only 'active' is released. 'pr_submitted' means they answered, and a
+   * review taking longer than the deadline is the maintainer's queue, not the
+   * contributor's silence - releasing those would punish the wrong person.
+   *
+   * Silence counts as an abandon, which halves their tickets next time via
+   * weight_per_abandon. A rejected pull request does not, and is not touched
+   * here.
+   */
+  async releaseStaleAssignments(): Promise<{ released: { bountyId: string; githubLogin: string }[] }> {
+    const r = await this.d.db.query<{ bounty_id: string; github_login: string }>(
+      `UPDATE bounty_assignments
+          SET status = 'released_stale',
+              released_at = $1,
+              release_reason = 'no pull request before the deadline',
+              counts_as_abandon = true,
+              updated_at = now()
+        WHERE status = 'active' AND stale_at <= $1
+      RETURNING bounty_id, github_login`,
+      [this.d.now().toISOString()],
+    );
+
+    // Put their application back in the pool as 'lost' rather than leaving it
+    // 'won', so the re-draw can see them.
+    //
+    // They are not excluded outright, which was the alternative. The abandon
+    // weight already exists for exactly this - it halves their tickets, and
+    // halves them again if it happens twice - and that is a proportionate
+    // answer where exclusion is a blunt second mechanism doing the same job.
+    // On a small pool, excluding the only previous applicant would also leave
+    // a bounty with nobody to draw from.
+    for (const row of r.rows) {
+      await this.d.db.query(
+        `UPDATE bounty_applications SET status = 'lost', updated_at = now()
+          WHERE bounty_id = $1 AND github_login = $2 AND status = 'won'`,
+        [row.bounty_id, row.github_login],
+      );
+    }
+    return { released: r.rows.map((x) => ({ bountyId: x.bounty_id, githubLogin: x.github_login })) };
+  }
+
+  /**
    * Every window that has closed and has no live assignment yet.
    *
    * Extends rather than gives up when nobody applied, up to a limit: a bounty
@@ -664,12 +716,21 @@ export class DrawService {
    * wants it", and silently leaving it unassignable teaches contributors that
    * the page is stale.
    */
-  async closeDueWindows(): Promise<{ drawn: string[]; extended: string[]; skipped: string[] }> {
+  async closeDueWindows(): Promise<{ drawn: string[]; extended: string[]; skipped: string[]; released: string[] }> {
     const cfg = await this.config();
     const drawn: string[] = [];
     const extended: string[] = [];
     const skipped: string[] = [];
-    if (!boolOf(cfg.auto_draw_enabled, true)) return { drawn, extended, skipped };
+
+    // Before looking for windows to close: give back anything whose winner
+    // went quiet. A bounty with a stale assignment is not "assigned", and
+    // leaving it that way is how one silent winner parks a bounty forever.
+    // Runs even with the automatic draw off - releasing is not drawing, and a
+    // deadline that only applies when a setting is on is not a deadline.
+    const { released } = await this.releaseStaleAssignments();
+    const releasedIds = released.map((x) => x.bountyId);
+
+    if (!boolOf(cfg.auto_draw_enabled, true)) return { drawn, extended, skipped, released: releasedIds };
 
     const due = await this.d.db.query<{ id: string; window_extensions: number }>(
       `SELECT b.id, b.window_extensions
@@ -711,7 +772,7 @@ export class DrawService {
         skipped.push(row.id);
       }
     }
-    return { drawn, extended, skipped };
+    return { drawn, extended, skipped, released: releasedIds };
   }
 }
 
