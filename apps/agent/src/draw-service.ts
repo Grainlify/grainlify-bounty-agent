@@ -557,7 +557,10 @@ export class DrawService {
    * draw row for inspection, but assigns nobody. That is how a weight change
    * gets checked before it decides anything.
    */
-  async runDrawFor(bountyId: string, opts: { triggeredBy: string; simulate?: boolean }): Promise<DrawOutcome | { error: string; detail: string }> {
+  async runDrawFor(
+    bountyId: string,
+    opts: { triggeredBy: string; simulate?: boolean; staleHours?: number },
+  ): Promise<DrawOutcome | { error: string; detail: string }> {
     const simulate = opts.simulate === true;
     const cfg = await this.config();
     const now = this.d.now();
@@ -579,10 +582,22 @@ export class DrawService {
       }
     }
 
+    // Somebody we unassigned by decision is kept out of the NEXT draw only.
+    // Not as a penalty - their record and their weight are untouched - but
+    // because unassigning somebody and handing it straight back to them is a
+    // pair of messages that reads as a mistake. They are in every later draw,
+    // including a later redraw of this same bounty.
+    const excluded = (await this.d.db.query<{ exclude_login_next_draw: string | null }>(
+      'SELECT exclude_login_next_draw FROM bounties WHERE id = $1', [bountyId],
+    )).rows[0]?.exclude_login_next_draw ?? null;
+
     const a = await this.d.db.query<{ github_user_id: string; github_login: string; fit: string | null; difficulty_match: string | null }>(
       `SELECT github_user_id, github_login, fit, difficulty_match
-         FROM bounty_applications WHERE bounty_id = $1 AND status IN ('applied','lost') ORDER BY created_at`,
-      [bountyId],
+         FROM bounty_applications
+        WHERE bounty_id = $1 AND status IN ('applied','lost')
+          AND ($2::text IS NULL OR lower(github_login) <> lower($2))
+        ORDER BY created_at`,
+      [bountyId, excluded],
     );
     const history = await this.historyFor(a.rows.map((x) => Number(x.github_user_id)));
 
@@ -645,7 +660,7 @@ export class DrawService {
     let assignmentId: string | null = null;
     let staleAt: string | null = null;
     if (!simulate && result.winner) {
-      const staleHours = intOf(cfg.assignment_stale_hours, 72);
+      const staleHours = opts.staleHours ?? intOf(cfg.assignment_stale_hours, 72);
       const asg = await this.d.db.query<{ id: string; stale_at: Date }>(
         `INSERT INTO bounty_assignments (bounty_id, draw_id, github_user_id, github_login, status, assigned_at, stale_at)
          VALUES ($1,$2,$3,$4,'active',$5,$5::timestamptz + ($6 || ' hours')::interval)
@@ -654,6 +669,12 @@ export class DrawService {
       );
       assignmentId = asg.rows[0]!.id;
       staleAt = new Date(asg.rows[0]!.stale_at).toISOString();
+      // Consumed by the draw that honoured it. An exclusion that survived its
+      // own draw would keep somebody out of every future one, which is a
+      // penalty nobody decided to impose.
+      if (excluded) {
+        await this.d.db.query('UPDATE bounties SET exclude_login_next_draw = NULL WHERE id = $1', [bountyId]);
+      }
       await this.d.db.query(
         `UPDATE bounty_applications SET status = CASE WHEN github_user_id = $2 THEN 'won' ELSE 'lost' END, updated_at = now()
           WHERE bounty_id = $1 AND status IN ('applied','lost')`,
@@ -750,6 +771,137 @@ export class DrawService {
    * weight_per_abandon. A rejected pull request does not, and is not touched
    * here.
    */
+  /**
+   * End an assignment because somebody decided to, not because a clock ran out.
+   *
+   * The difference from the stale sweeper is the whole point: nobody went
+   * quiet, so no abandon is recorded, the draw weight is untouched, and the
+   * application goes back into the pool as it was. What is recorded is who
+   * decided and why, because an unassignment without a reason is the kind of
+   * thing that should not be possible to do quietly.
+   */
+  async unassignByDecision(input: { bountyId: string; actor: string; reason: string }) {
+    const reason = input.reason.trim();
+    if (!reason) return { ok: false as const, error: 'reason_required' };
+
+    const a = await this.d.db.query<{
+      id: string; github_user_id: string; github_login: string; status: string;
+      repo: string; issue_number: number; amount_minor: string; currency: string;
+    }>(
+      `SELECT a.id, a.github_user_id, a.github_login, a.status,
+              r.owner||'/'||r.name AS repo, b.issue_number, b.amount_minor::text AS amount_minor, b.currency
+         FROM bounty_assignments a
+         JOIN bounties b ON b.id = a.bounty_id
+         JOIN repos r ON r.id = b.repo_id
+        WHERE a.bounty_id = $1 AND a.status IN ('active','pr_submitted')`,
+      [input.bountyId],
+    );
+    const asg = a.rows[0];
+    if (!asg) return { ok: false as const, error: 'no_active_assignment' };
+
+    // Once a pull request exists this is no longer one person's decision. The
+    // funded-bounty rule is that both sides agree, and it applies here too
+    // rather than being a thing only funded bounties get.
+    if (asg.status === 'pr_submitted') {
+      return {
+        ok: false as const,
+        error: 'pr_open',
+        detail: 'a pull request is open, so unassigning needs the contributor to agree as well',
+      };
+    }
+
+    await this.d.db.query(
+      `UPDATE bounty_assignments
+          SET status = 'released_voluntary', released_at = now(), release_reason = $2,
+              released_by = $3, counts_as_abandon = false, updated_at = now()
+        WHERE id = $1`,
+      [asg.id, reason, input.actor],
+    );
+    // Back in the pool exactly as they were. 'lost' rather than removed, so a
+    // later draw can see them.
+    await this.d.db.query(
+      `UPDATE bounty_applications SET status = 'lost', updated_at = now()
+        WHERE bounty_id = $1 AND github_login = $2 AND status = 'won'`,
+      [input.bountyId, asg.github_login],
+    );
+    await this.d.db.query(
+      'UPDATE bounties SET exclude_login_next_draw = $2, updated_at = now() WHERE id = $1',
+      [input.bountyId, asg.github_login],
+    );
+    await this.d.db.query(
+      `INSERT INTO audit_log (actor, action, subject, detail) VALUES ($1,'assignment.unassigned',$2,$3)`,
+      [input.actor, input.bountyId, JSON.stringify({ assignmentId: asg.id, contributor: asg.github_login, reason })],
+    );
+
+    await enqueueEvent(this.d.db, {
+      kind: 'bounty_unassigned',
+      githubUserId: Number(asg.github_user_id),
+      dedupeKey: dedupe.unassigned(asg.id),
+      payload: {
+        bountyId: input.bountyId, repo: asg.repo, issue_number: asg.issue_number,
+        amount_minor: asg.amount_minor, currency: asg.currency, reason, actor: input.actor,
+      },
+    });
+
+    return { ok: true as const, assignmentId: asg.id, contributor: asg.github_login, reason };
+  }
+
+  /**
+   * Move the deadline on a live assignment.
+   *
+   * Recorded in two places on purpose: the audit log, and a table the
+   * contributor's own page reads. A deadline that moved without the person
+   * working to it being told is the silent row edit we tell everybody else we
+   * do not do.
+   */
+  async setAssignmentDeadline(input: { bountyId: string; newAt: Date; actor: string; reason: string }) {
+    const reason = input.reason.trim();
+    if (!reason) return { ok: false as const, error: 'reason_required' };
+    if (Number.isNaN(input.newAt.getTime())) return { ok: false as const, error: 'bad_deadline' };
+    if (input.newAt <= this.d.now()) return { ok: false as const, error: 'deadline_in_past' };
+
+    const a = await this.d.db.query<{
+      id: string; github_user_id: string; stale_at: Date;
+      repo: string; issue_number: number; amount_minor: string; currency: string;
+    }>(
+      `SELECT a.id, a.github_user_id, a.stale_at,
+              r.owner||'/'||r.name AS repo, b.issue_number, b.amount_minor::text AS amount_minor, b.currency
+         FROM bounty_assignments a
+         JOIN bounties b ON b.id = a.bounty_id
+         JOIN repos r ON r.id = b.repo_id
+        WHERE a.bounty_id = $1 AND a.status IN ('active','pr_submitted')`,
+      [input.bountyId],
+    );
+    const asg = a.rows[0];
+    if (!asg) return { ok: false as const, error: 'no_active_assignment' };
+
+    const previous = new Date(asg.stale_at);
+    await this.d.db.query('UPDATE bounty_assignments SET stale_at = $2, updated_at = now() WHERE id = $1',
+      [asg.id, input.newAt.toISOString()]);
+    await this.d.db.query(
+      `INSERT INTO bounty_deadline_changes (assignment_id, previous_at, new_at, reason, changed_by)
+       VALUES ($1,$2,$3,$4,$5)`,
+      [asg.id, previous.toISOString(), input.newAt.toISOString(), reason, input.actor],
+    );
+    await this.d.db.query(
+      `INSERT INTO audit_log (actor, action, subject, detail) VALUES ($1,'assignment.deadline_changed',$2,$3)`,
+      [input.actor, input.bountyId, JSON.stringify({ assignmentId: asg.id, from: previous.toISOString(), to: input.newAt.toISOString(), reason })],
+    );
+
+    await enqueueEvent(this.d.db, {
+      kind: 'bounty_deadline_changed',
+      githubUserId: Number(asg.github_user_id),
+      dedupeKey: dedupe.deadlineChanged(asg.id, input.newAt.toISOString()),
+      payload: {
+        bountyId: input.bountyId, repo: asg.repo, issue_number: asg.issue_number,
+        amount_minor: asg.amount_minor, currency: asg.currency,
+        previousAt: previous.toISOString(), staleAt: input.newAt.toISOString(), reason, actor: input.actor,
+      },
+    });
+
+    return { ok: true as const, assignmentId: asg.id, previousAt: previous.toISOString(), staleAt: input.newAt.toISOString() };
+  }
+
   async releaseStaleAssignments(): Promise<{ released: { bountyId: string; githubLogin: string }[]; warned: string[] }> {
     // The warning is computed HERE, from the same stale_at and the same clock
     // that decide the release. Put anywhere else, the two could disagree - and

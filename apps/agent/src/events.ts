@@ -25,6 +25,8 @@ export type EventKind =
   | 'bounty_draw_lost'
   | 'bounty_assignment_expiring'
   | 'bounty_review_posted'
+  | 'bounty_unassigned'
+  | 'bounty_deadline_changed'
   | 'bounty_paid';
 
 export interface BountyEvent {
@@ -69,4 +71,10 @@ export const dedupe = {
   assignmentExpiring: (assignmentId: string) => `assignment_expiring:${assignmentId}`,
   reviewPosted: (bountyId: string, prNumber: number) => `review_posted:${bountyId}:${prNumber}`,
   paid: (payoutId: string) => `paid:${payoutId}`,
+  // Keyed to the assignment: one unassignment is one message, however many
+  // times a retry re-enqueues it.
+  unassigned: (assignmentId: string) => `unassigned:${assignmentId}`,
+  // Keyed to the assignment AND the new deadline, so moving a deadline twice
+  // tells the contributor twice, and moving it to the same value does not.
+  deadlineChanged: (assignmentId: string, newAt: string) => `deadline_changed:${assignmentId}:${newAt}`,
 };
