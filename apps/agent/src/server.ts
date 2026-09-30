@@ -415,8 +415,29 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             const v = await d.draw.maintainerView(f.subject);
             return 'error' in v ? reply(404, v) : reply(200, v);
           }
+          case 'unassign': {
+            const r = await d.draw.unassignByDecision({
+              bountyId: f.subject,
+              actor: f.login,
+              reason: String(body.reason ?? ''),
+            });
+            return r.ok ? reply(200, r) : reply(409, r);
+          }
+          case 'set_assignment_deadline': {
+            const r = await d.draw.setAssignmentDeadline({
+              bountyId: f.subject,
+              newAt: new Date(String(body.deadline ?? '')),
+              actor: f.login,
+              reason: String(body.reason ?? ''),
+            });
+            return r.ok ? reply(200, r) : reply(409, r);
+          }
           case 'run_draw': {
-            const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true });
+            const staleHours = body.staleHours === undefined ? undefined : Number(body.staleHours);
+            if (staleHours !== undefined && (!Number.isFinite(staleHours) || staleHours <= 0)) {
+              return reply(400, { error: 'bad_deadline' });
+            }
+            const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true, staleHours });
             return 'error' in r ? reply(409, r) : reply(200, r);
           }
           default:
