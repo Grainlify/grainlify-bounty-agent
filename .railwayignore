@@ -10,3 +10,7 @@ secrets
 *.pem
 # The wallet-link page is not approved yet; it is never deployed.
 docs/link
+# 1.4 GB of Rust build output the agent never reads; it pushed the upload
+# past Railway's size limit.
+contracts/**/target
+contracts/**/.anchor

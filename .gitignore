@@ -24,3 +24,8 @@ data/
 # Eval data: anonymised production export, local only (never commit raw).
 eval/data/
 eval/raw/
+
+# Rust/Anchor build output. Rebuilt by `anchor build`; the program's wire
+# format lives in apps/agent/src/escrow-ix.ts, so nothing at runtime reads it.
+target/
+.anchor/
