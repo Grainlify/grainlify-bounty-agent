@@ -29,3 +29,7 @@ eval/raw/
 # format lives in apps/agent/src/escrow-ix.ts, so nothing at runtime reads it.
 target/
 .anchor/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat
+.gitignore
