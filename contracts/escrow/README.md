@@ -40,6 +40,24 @@ The floor exists because a percentage alone loses money at the small end —
 2.5% of a $1 bounty is 2.5c against roughly 2.3c of cost per bounty, almost all
 of it inference. This is margin on top of cost, not cost recovery.
 
+## What an admin cannot do
+
+An admin cannot end a dispute early in the funder's favour. There is no
+instruction, no button and no operational path that refunds a funder before
+their deadline, and there will not be one: the deadline is the contributor's
+only protection once work has been handed to them, and an admin who could cut
+it short would be that protection's exception.
+
+What an admin can do in a dispute is attest a merge and release to the
+contributor, leave it to the deadline, or record a conduct note against the
+funder. Doing nothing is a complete answer — if the pull request is merged
+before the deadline the contributor is paid, and if it is not the funder
+refunds themselves. Neither outcome needs an admin.
+
+The program is what makes this a guarantee rather than a policy: `refund` is
+funder-signed and checks the deadline, and no other instruction returns funds
+to a funder at all.
+
 ## Checking the claims rather than believing them
 
 Each promise this README makes has a test that fails if it stops being true.
@@ -57,6 +75,8 @@ you doubt:
 | ...including when the fee floor applies | `still pays the contributor exactly the advertised amount on a floored fee` |
 | The rent comes back to the funder | `returns the rent on both accounts to the funder` |
 | A vanished assignee or rejected PR moves no money | `unassign puts it back without paying, and it can be assigned again` |
+| A funder cannot take the escrow back out from under an open PR | `cannot unassign and then cancel straight back out` |
+| Nothing returns funds to a funder before their deadline | `refund is refused before the deadline` |
 
 Run them yourself with the commands at the bottom of this file.
 

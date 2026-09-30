@@ -7,6 +7,7 @@ import type pg from 'pg';
 import type { Approval } from '../../../packages/gate/src/approval.ts';
 import type { BountyService } from './service.ts';
 import type { DrawService } from './draw-service.ts';
+import type { EscrowService } from './escrow-service.ts';
 import { corsHeaders, type PublicApi } from './public.ts';
 import { verifySessionAction } from '../../../packages/gate/src/session-action.ts';
 
@@ -34,6 +35,13 @@ export interface ServerDeps {
    * boots without its token must not serve the data it is missing the key for.
    */
   payoutsApiToken?: string;
+  /**
+   * Maintainer-funded bounties. Absent until the escrow is configured, and the
+   * routes answer 503 rather than pretending the feature is merely switched
+   * off - "not wired up" and "turned off" are different answers and an
+   * operator needs to tell them apart.
+   */
+  escrow?: EscrowService;
   /**
    * Applications, the draw and the admin controls. Absent in the tests that
    * only exercise the webhook and the link routes, so those routes answer 503
@@ -344,6 +352,46 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               applications: await d.draw.applicationsFor(f.subject),
               draws: await d.draw.drawsFor(f.subject),
             });
+          // --- funded bounties -------------------------------------------
+          //
+          // Every one of these refuses outright while funded_bounties_enabled
+          // is off, rather than rendering a disabled screen: a feature that is
+          // switched off should not have a reachable back door.
+          case 'escrow_quote': {
+            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+            let amount: bigint;
+            try { amount = BigInt(String(body.amountMinor ?? '')); }
+            catch { return reply(400, { error: 'bad_amount' }); }
+            if (amount <= 0n) return reply(400, { error: 'bad_amount' });
+            const q = await d.escrow.quoteFor(amount);
+            return reply(200, {
+              amountMinor: q.amountMinor.toString(),
+              feeBps: q.feeBps,
+              feeMinimumMinor: q.feeMinimumMinor.toString(),
+              feeAmountMinor: q.feeAmountMinor.toString(),
+              totalMinor: q.totalMinor.toString(),
+              effectiveRate: q.effectiveRate,
+              flooredByMinimum: q.flooredByMinimum,
+            });
+          }
+          case 'escrow_state': {
+            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+            const e = await d.escrow.detail(f.subject);
+            return e ? reply(200, { escrow: e }) : reply(404, { error: 'no_escrow' });
+          }
+          case 'escrow_list': {
+            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+            return reply(200, { escrows: await d.escrow.all() });
+          }
+          case 'escrow_confirm': {
+            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+            const sig = String(body.signature ?? '');
+            if (!sig) return reply(400, { error: 'signature_required' });
+            const r = await d.escrow.confirmFunding(f.subject, sig);
+            return r.ok ? reply(200, r) : reply(409, r);
+          }
           case 'list_repos':
             return reply(200, { repos: await d.service.repoBountyStates() });
           case 'set_repo_bounties': {
