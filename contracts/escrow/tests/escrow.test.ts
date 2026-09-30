@@ -457,3 +457,29 @@ describe('the fee floor', () => {
     expect(await balance(feeToken)).toBe(feeBefore + USDC(0.25));
   }, 90_000);
 });
+
+describe('a funder taking the money back out from under an open pull request', () => {
+  // Written to prove a hole, not to pass. In self-assign mode the funder may
+  // unassign on their own, and `cancel` only asks whether somebody is assigned
+  // RIGHT NOW - so unassign-then-cancel returns the whole escrow instantly,
+  // while a contributor has merged-ready work in an open pull request and no
+  // deadline left to wait for.
+  it('cannot unassign and then cancel straight back out', async () => {
+    const s = await setup({ mode: MODE_SELF, deadlineIn: 3600 });
+    const c = await contributorWith();
+    await sendAndConfirmTransaction(conn, new Transaction().add(
+      ixAssign({ signer: s.funder.publicKey, escrow: s.escrow, contributor: c.kp.publicKey })), [s.funder]);
+    await sendAndConfirmTransaction(conn, new Transaction().add(
+      ixUnassign({ signer: s.funder.publicKey, escrow: s.escrow })), [s.funder]);
+
+    // The deadline is an hour away, so refund must still be refused - and
+    // cancel has to be refused too, or the deadline protects nobody.
+    await expectFail(
+      sendAndConfirmTransaction(conn, new Transaction().add(ixCancel({
+        funder: s.funder.publicKey, escrow: s.escrow, vault: s.vault, funderToken: s.funderToken, mint,
+      })), [s.funder]),
+      /AlreadyHasContributor|NotOpen|0x/,
+    );
+    expect(await balance(s.vault)).toBe(USDC(51.25));
+  }, 120_000);
+});

@@ -142,12 +142,13 @@ export function decodeEscrow(data: Buffer) {
   const hasContributor = data[o] ?? 0; o += 1;
   let contributor: PublicKey | null = null;
   if (hasContributor) { contributor = new PublicKey(data.subarray(o, o + 32)); o += 32; }
+  const everAssigned = (data[o] ?? 0) === 1; o += 1;
   const deadline = data.readBigInt64LE(o); o += 8;
   const hasCommit = data[o] ?? 0; o += 1;
   let mergeCommit: Buffer | null = null;
   if (hasCommit) { mergeCommit = Buffer.from(data.subarray(o, o + 20)); o += 20; }
   return { bountyId, funder, mint, amount, feeBps, feeMinimum, feeAmount, feeDestination, attestor,
-    mode, state: STATE[stateByte] ?? `unknown(${stateByte})`, contributor, deadline, mergeCommit };
+    mode, state: STATE[stateByte] ?? `unknown(${stateByte})`, contributor, everAssigned, deadline, mergeCommit };
 }
 
 /** Anchor's event discriminator: sha256("event:<Name>")[0..8]. */

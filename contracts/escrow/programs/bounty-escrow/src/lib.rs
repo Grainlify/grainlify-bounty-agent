@@ -80,6 +80,15 @@ pub struct Escrow {
     pub state: EscrowState,
     /// Set by `assign`.
     pub contributor: Option<Pubkey>,
+    /// True once anybody has ever been assigned, and never cleared.
+    ///
+    /// `cancel` asked only whether somebody was assigned right now, so a funder
+    /// could assign, unassign and cancel straight back out - taking the whole
+    /// escrow instantly while a contributor had merged-ready work in an open
+    /// pull request and no deadline left to wait for. Once work has been handed
+    /// to somebody, the way out is the deadline, which is the protection the
+    /// contributor is relying on.
+    pub ever_assigned: bool,
     /// Unix seconds. After this the funder may refund whatever the state.
     pub deadline: i64,
     /// The commit the attestor named at release. Recorded for the ledger; the
@@ -93,7 +102,7 @@ pub struct Escrow {
 
 impl Escrow {
     // discriminator + fields, with Option/enum tags
-    pub const LEN: usize = 8 + 16 + 32 + 32 + 8 + 2 + 8 + 8 + 32 + 32 + 1 + 1 + (1 + 32) + 8 + (1 + 20) + 8 + 1 + 1;
+    pub const LEN: usize = 8 + 16 + 32 + 32 + 8 + 2 + 8 + 8 + 32 + 32 + 1 + 1 + (1 + 32) + 1 + 8 + (1 + 20) + 8 + 1 + 1;
 }
 
 #[error_code]
@@ -120,7 +129,7 @@ pub enum EscrowError {
     WrongContributor,
     #[msg("the fee account does not match the destination fixed at funding")]
     WrongFeeDestination,
-    #[msg("cancelling is only possible before a contributor is assigned")]
+    #[msg("cancelling is only possible before anybody has ever been assigned; after that the deadline applies")]
     AlreadyHasContributor,
 }
 
@@ -197,6 +206,7 @@ pub mod bounty_escrow {
         e.assignment_mode = assignment_mode;
         e.state = EscrowState::Funded;
         e.contributor = None;
+        e.ever_assigned = false;
         e.deadline = deadline;
         e.merge_commit = None;
         e.created_at = now;
@@ -240,6 +250,7 @@ pub mod bounty_escrow {
         }
 
         e.contributor = Some(contributor);
+        e.ever_assigned = true;
         e.state = EscrowState::Assigned;
         emit!(EscrowAssigned { escrow: e.key(), contributor });
         Ok(())
@@ -371,7 +382,9 @@ pub mod bounty_escrow {
     pub fn cancel(ctx: Context<Refund>) -> Result<()> {
         let e = &ctx.accounts.escrow;
         require!(e.state == EscrowState::Funded, EscrowError::NotOpen);
-        require!(e.contributor.is_none(), EscrowError::AlreadyHasContributor);
+        // Not "is anybody assigned now" but "has anybody ever been": otherwise
+        // unassign-then-cancel walks straight past the deadline.
+        require!(!e.ever_assigned, EscrowError::AlreadyHasContributor);
         require_keys_eq!(ctx.accounts.funder.key(), e.funder, EscrowError::FunderOnly);
 
         let total = e.amount.checked_add(e.fee_amount).unwrap();
