@@ -6,6 +6,9 @@
 //                                         create a bounty at a chosen amount, with no
 //                                         inference call and no GitHub comment
 //   approve <payout-id>                   show a payout, confirm, sign with the approver key, submit
+//   bounty close <bounty-id> --actor <login> --reason <text>
+//                                         cancel an open bounty and release its holder as our
+//                                         decision (no abandon); they are told the reason
 //
 // `approve` talks to the agent over HTTP and signs locally: the approver key
 // never leaves this machine and never reaches the agent.
@@ -61,6 +64,17 @@ async function main() {
     if (cmd === 'repo' && sub === 'add' && rest[0]) {
       await service.addRepo(rest[0], true);
       console.log(`allowlisted ${rest[0]}`);
+    } else if (cmd === 'bounty' && sub === 'close' && rest[0]) {
+      const flag = (name: string) => {
+        const i = rest.indexOf(`--${name}`);
+        return i >= 0 ? rest[i + 1] : undefined;
+      };
+      const actor = flag('actor'); const reason = flag('reason');
+      if (!actor || !reason) throw new Error('bounty close needs --actor <login> and --reason <text>');
+      const { draw } = await (await import('./wiring.ts')).wire();
+      const r = await draw.closeByDecision({ bountyId: rest[0], actor, reason });
+      if (!r.ok) throw new Error(`not closed: ${r.error}${'detail' in r && r.detail ? ` - ${r.detail}` : ''}`);
+      console.log(`closed ${rest[0]}${r.contributor ? `; released ${r.contributor} (no abandon); notification ${r.notified ? 'queued' : 'NOT queued'}` : '; nobody held it'}`);
     } else if (cmd === 'bounty' && sub === 'seed' && rest[0] && rest[1] && rest[2]) {
       const flag = (name: string) => {
         const i = rest.indexOf(`--${name}`);

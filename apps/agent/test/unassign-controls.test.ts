@@ -123,6 +123,65 @@ describe.skipIf(!dbUrl)('unassigning as a decision', () => {
     expect((await assignment(bountyId)).status).toBe('pr_submitted');   // nothing moved
   });
 
+  describe('closing a bounty by decision', () => {
+    // What unassigning alone could not do on 30 September: the bounty went
+    // back to the draw sweep and was redrawn within seconds.
+    it('cancels the bounty so the sweep never draws it again', async () => {
+      const { bountyId } = await drawnBounty();
+      const r = await svc.closeByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Closing this round.' });
+      expect(r).toMatchObject({ ok: true, notified: true });
+
+      const b = await db.query<{ status: string }>('SELECT status FROM bounties WHERE id = $1', [bountyId]);
+      expect(b.rows[0]!.status).toBe('cancelled');
+      const swept = await svc.closeDueWindows();
+      expect(swept.drawn).toEqual([]);
+      const live = await db.query(
+        "SELECT 1 FROM bounty_assignments WHERE bounty_id = $1 AND status IN ('active','pr_submitted')", [bountyId]);
+      expect(live.rowCount).toBe(0);
+    });
+
+    it('releases the holder as our decision: no abandon, told why, with nothing about a next draw', async () => {
+      const { bountyId } = await drawnBounty();
+      await svc.closeByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Closing this round.' });
+
+      const a = await assignment(bountyId);
+      expect(a.status).toBe('released_voluntary');
+      expect(a.counts_as_abandon).toBe(false);
+      expect(a.released_by).toBe('Jagadeeshftw');
+
+      const ev = await db.query<{ payload: { reason: string; closed?: boolean } }>(
+        "SELECT payload FROM bounty_events WHERE kind = 'bounty_unassigned'");
+      expect(ev.rows[0]!.payload).toMatchObject({ reason: 'Closing this round.', closed: true });
+      const audit = await db.query("SELECT 1 FROM audit_log WHERE action = 'bounty.closed'");
+      expect(audit.rowCount).toBe(1);
+    });
+
+    it('refuses a bounty with a pull request under review, and leaves it exactly as it was', async () => {
+      const { bountyId } = await drawnBounty();
+      await db.query("UPDATE bounties SET status = 'in_review' WHERE id = $1", [bountyId]);
+      const r = await svc.closeByDecision({ bountyId, actor: 'admin', reason: 'Closing this round.' });
+      expect(r).toMatchObject({ ok: false, error: 'not_open' });
+      expect((await assignment(bountyId)).status).toBe('active');
+      const b = await db.query<{ status: string }>('SELECT status FROM bounties WHERE id = $1', [bountyId]);
+      expect(b.rows[0]!.status).toBe('in_review');
+    });
+
+    it('refuses an open pull request even on a bounty still marked open', async () => {
+      const { bountyId } = await drawnBounty();
+      await db.query("UPDATE bounty_assignments SET status = 'pr_submitted' WHERE bounty_id = $1", [bountyId]);
+      expect(await svc.closeByDecision({ bountyId, actor: 'admin', reason: 'Closing.' }))
+        .toMatchObject({ ok: false, error: 'pr_open' });
+      const b = await db.query<{ status: string }>('SELECT status FROM bounties WHERE id = $1', [bountyId]);
+      expect(b.rows[0]!.status).toBe('posted');          // rolled back, not half-closed
+    });
+
+    it('refuses without a reason', async () => {
+      const { bountyId } = await drawnBounty();
+      expect(await svc.closeByDecision({ bountyId, actor: 'admin', reason: ' ' }))
+        .toMatchObject({ ok: false, error: 'reason_required' });
+    });
+  });
+
   it('keeps the person out of the next draw only, then lets them back in', async () => {
     const { bountyId, winner } = await drawnBounty();
     await svc.unassignByDecision({ bountyId, actor: 'admin', reason: 'faster turnaround' });

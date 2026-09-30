@@ -847,6 +847,99 @@ export class DrawService {
   }
 
   /**
+   * Close a bounty by decision: cancelled, and whoever holds it released as
+   * our decision - no abandon, draw weight untouched, told why.
+   *
+   * One transaction, and the bounty is cancelled in it. Releasing an
+   * assignment on a bounty that is still open hands it straight back to the
+   * draw sweep, which redraws within seconds: that is what happened to #34,
+   * #35 and #36 on 30 September. A cancelled bounty is never drawn again.
+   *
+   * Only an open bounty can be closed this way. One with a pull request under
+   * review, awaiting payout or paid is refused: someone has delivered work,
+   * and walking away from that is not a single-sided decision.
+   */
+  async closeByDecision(input: { bountyId: string; actor: string; reason: string }) {
+    const reason = input.reason.trim();
+    if (!reason) return { ok: false as const, error: 'reason_required' };
+
+    type Held = { id: string; github_user_id: string; github_login: string; status: string };
+    let bounty: { status: string; issue_number: number; amount_minor: string; currency: string; repo: string } | undefined;
+    let held: Held | undefined;
+    const client = await this.d.db.connect();
+    try {
+      await client.query('BEGIN');
+      bounty = (await client.query(
+        `SELECT b.status, b.issue_number, b.amount_minor::text AS amount_minor, b.currency, r.owner||'/'||r.name AS repo
+           FROM bounties b JOIN repos r ON r.id = b.repo_id
+          WHERE b.id = $1 FOR UPDATE OF b`,
+        [input.bountyId],
+      )).rows[0];
+      if (!bounty) { await client.query('ROLLBACK'); return { ok: false as const, error: 'not_found' }; }
+      if (bounty.status !== 'posted') {
+        await client.query('ROLLBACK');
+        return { ok: false as const, error: 'not_open', detail: `the bounty is ${bounty.status}, not open` };
+      }
+      held = (await client.query<Held>(
+        `SELECT id, github_user_id, github_login, status FROM bounty_assignments
+          WHERE bounty_id = $1 AND status IN ('active','pr_submitted') FOR UPDATE`,
+        [input.bountyId],
+      )).rows[0];
+      if (held?.status === 'pr_submitted') {
+        await client.query('ROLLBACK');
+        return { ok: false as const, error: 'pr_open', detail: 'a pull request is open against this bounty' };
+      }
+
+      await client.query(`UPDATE bounties SET status = 'cancelled', updated_at = now() WHERE id = $1`, [input.bountyId]);
+      if (held) {
+        await client.query(
+          `UPDATE bounty_assignments
+              SET status = 'released_voluntary', released_at = now(), release_reason = $2,
+                  released_by = $3, counts_as_abandon = false, updated_at = now()
+            WHERE id = $1`,
+          [held.id, reason, input.actor],
+        );
+        await client.query(
+          `UPDATE bounty_applications SET status = 'lost', updated_at = now()
+            WHERE bounty_id = $1 AND github_login = $2 AND status = 'won'`,
+          [input.bountyId, held.github_login],
+        );
+      }
+      await client.query(
+        `INSERT INTO audit_log (actor, action, subject, detail) VALUES ($1,'bounty.closed',$2,$3)`,
+        [input.actor, input.bountyId, JSON.stringify({
+          previousStatus: bounty.status, assignmentId: held?.id ?? null, contributor: held?.github_login ?? null, reason,
+        })],
+      );
+      await client.query('COMMIT');
+    } catch (e) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw e;
+    } finally {
+      client.release();
+    }
+
+    // After the commit, not inside it: the enqueue never throws, so a failure
+    // inside the transaction would abort it silently. Reported instead.
+    let notified = false;
+    if (held) {
+      notified = await enqueueEvent(this.d.db, {
+        kind: 'bounty_unassigned',
+        githubUserId: Number(held.github_user_id),
+        dedupeKey: dedupe.unassigned(held.id),
+        payload: {
+          bountyId: input.bountyId, repo: bounty.repo, issue_number: bounty.issue_number,
+          amount_minor: bounty.amount_minor, currency: bounty.currency, reason, actor: input.actor,
+          // The bounty is gone, so the message must not say the application
+          // is back in the pool or mention the next draw.
+          closed: true,
+        },
+      });
+    }
+    return { ok: true as const, contributor: held?.github_login ?? null, notified };
+  }
+
+  /**
    * Move the deadline on a live assignment.
    *
    * Recorded in two places on purpose: the audit log, and a table the
