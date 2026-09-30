@@ -1,0 +1,3 @@
+#!/bin/sh
+# Enabled per clone with: git config core.hooksPath .githooks
+exec sh scripts/check-file-sizes.sh --staged

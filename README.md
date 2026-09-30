@@ -63,6 +63,7 @@ The gateway's own error message says `payload.proof`, but it reads the **top-lev
 ## Development
 
 ```bash
+git config core.hooksPath .githooks        # refuses any staged file over 10 MB
 pnpm install
 docker compose up -d postgres
 TEST_DATABASE_URL=postgres://agent:agent-local-only@127.0.0.1:55432/agent pnpm test
