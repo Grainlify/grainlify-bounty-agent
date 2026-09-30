@@ -40,6 +40,26 @@ The floor exists because a percentage alone loses money at the small end —
 2.5% of a $1 bounty is 2.5c against roughly 2.3c of cost per bounty, almost all
 of it inference. This is margin on top of cost, not cost recovery.
 
+## Checking the claims rather than believing them
+
+Each promise this README makes has a test that fails if it stops being true.
+They are in `tests/escrow.test.ts`, and they are named so you can find the one
+you doubt:
+
+| The claim | The test |
+|---|---|
+| Grainlify cannot redirect a release to an address it chooses | `cannot be redirected to an address the attestor chooses` |
+| The fee cannot be sent anywhere but the destination fixed at funding | `cannot send the fee somewhere other than the destination fixed at funding` |
+| In self-assign mode Grainlify cannot assign the bounty at all | `in self-assign mode only the funder can, and the attestor cannot` |
+| The funder can refund alone after the deadline, with no attestation | `refund works after the deadline with no attestor involvement, even while assigned` |
+| Nobody but the funder can refund | `nobody but the funder can refund` |
+| The contributor receives exactly the advertised amount | `pays the contributor the advertised amount and the fee separately` |
+| ...including when the fee floor applies | `still pays the contributor exactly the advertised amount on a floored fee` |
+| The rent comes back to the funder | `returns the rent on both accounts to the funder` |
+| A vanished assignee or rejected PR moves no money | `unassign puts it back without paying, and it can be assigned again` |
+
+Run them yourself with the commands at the bottom of this file.
+
 ## Where outcomes are recorded
 
 All three closing paths (`release`, `refund`, `cancel`) **close the escrow and

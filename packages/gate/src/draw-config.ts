@@ -133,6 +133,33 @@ export const DRAW_SETTINGS: Setting[] = [
       'Buy a fit assessment per application. Off means every applicant counts as "plausible" — a full ticket — which is the documented correct answer for most newcomers, so the draw runs unchanged with no model spend.',
   },
   {
+    key: 'funded_bounties_enabled',
+    type: 'bool',
+    default: 'false',
+    section: 'Funded bounties',
+    description:
+      'Let maintainers fund their own bounties through the on-chain escrow. Off means the funding screen does not exist and no escrow can be created; bounties funded by the agent are unaffected either way. This stays off until the devnet flow has been run by hand.',
+  },
+  {
+    key: 'funded_bounty_fee_bps',
+    type: 'int',
+    default: '250',
+    section: 'Funded bounties',
+    description:
+      'The platform fee on a funded bounty, in basis points, charged ON TOP of the amount so the contributor receives exactly what the bounty advertised. Recorded on each escrow at funding; changing it never touches an escrow already funded.',
+    min: 0,
+    max: 1000,
+  },
+  {
+    key: 'funded_bounty_fee_minimum_minor',
+    type: 'int',
+    default: '250000',
+    section: 'Funded bounties',
+    description:
+      'The floor under the percentage, in the mint\'s smallest unit (250000 = $0.25 at six decimals). A percentage alone loses money at the small end: 2.5% of a $1 bounty is 2.5c against roughly 2.3c of cost per bounty, almost all of it inference.',
+    min: 0,
+  },
+  {
     key: 'fit_difficulty_tier',
     type: 'enum',
     default: 'standard',
