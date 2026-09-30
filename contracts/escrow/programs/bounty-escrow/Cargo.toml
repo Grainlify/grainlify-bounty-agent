@@ -1,0 +1,21 @@
+[package]
+name = "bounty-escrow"
+version = "0.1.0"
+description = "Non-custodial escrow for maintainer-funded Grainlify bounties"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "bounty_escrow"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+
+[dependencies]
+anchor-lang = "0.32.1"
+anchor-spl = "0.32.1"
