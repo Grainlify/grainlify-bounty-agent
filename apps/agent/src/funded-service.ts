@@ -631,7 +631,9 @@ export class FundedService {
       dedupeKey: dedupe.unassigned(asg.id),
       payload: {
         bountyId: b.id, repo: b.repo, issue_number: b.issue_number, amount_minor: b.amount_minor, currency: b.currency,
-        reason: said, actor, funded: true,
+        // Before a pull request a funder need give no reason, and the
+        // message says so rather than quoting the placeholder as one.
+        reason: said, reasonGiven: reason.length > 0, actor, funded: true,
       },
     });
   }
