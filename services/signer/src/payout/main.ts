@@ -5,7 +5,8 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { keypairFromEnv } from '../rails.ts';
 import { PayoutJournal } from './journal.ts';
-import { PayoutSigner } from './payout-signer.ts';
+import { EscrowAttestor, SolanaEscrowChain } from './escrow-attestor.ts';
+import { fetchPullFromGitHub, PayoutSigner } from './payout-signer.ts';
 import { SplPayoutRail } from './rail.ts';
 import { createPayoutServer } from './server.ts';
 
@@ -38,8 +39,33 @@ const signer = new PayoutSigner(
   new SplPayoutRail(kp.secret, need('PAYOUT_RPC_URL')),
 );
 
+// The escrow attestor: optional, and its own key. Without it funded bounties
+// cannot be drawn or released, and say so; nothing else changes.
+let attestor: EscrowAttestor | undefined;
+const attestorKp = keypairFromEnv(env, 'ESCROW_ATTESTOR_KEYPAIR');
+if (attestorKp) {
+  const escrowNetwork = need('ESCROW_NETWORK');
+  if (escrowNetwork === 'solana-mainnet' && env.ESCROW_ALLOW_MAINNET !== 'yes') {
+    throw new Error('mainnet escrows are disabled (set ESCROW_ALLOW_MAINNET=yes deliberately)');
+  }
+  const chain = new SolanaEscrowChain(attestorKp.secret, need('ESCROW_RPC_URL'));
+  attestor = new EscrowAttestor(
+    {
+      network: escrowNetwork,
+      attestor: chain.address(),
+      // The same allowlist and approvers as payouts: one list, edited by hand.
+      allowedRepos: need('PAYOUT_ALLOWED_REPOS').split(',').map((s) => s.trim()).filter(Boolean),
+      trustedApprovers: need('APPROVER_PUBKEYS').split(',').map((s) => s.trim()).filter(Boolean),
+      caps: {},
+    },
+    journal,
+    chain,
+    fetchPullFromGitHub,
+  );
+}
+
 const port = Number(env.PAYOUT_SIGNER_PORT ?? env.PORT ?? 8788);
 const host = env.PAYOUT_SIGNER_HOST ?? '127.0.0.1';
-createPayoutServer(signer, journal, need('PAYOUT_SIGNER_TOKEN')).listen(port, host, () => {
-  console.log(`payout signer (${network}) ${signer.address()} on ${host}:${port}`);
+createPayoutServer(signer, journal, need('PAYOUT_SIGNER_TOKEN'), attestor).listen(port, host, () => {
+  console.log(`payout signer (${network}) ${signer.address()} on ${host}:${port}${attestor ? `; escrow attestor (${attestor.network()}) ${attestor.address()}` : '; no escrow attestor'}`);
 });

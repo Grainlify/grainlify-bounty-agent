@@ -33,6 +33,8 @@ export interface PullFacts {
   merged: boolean;
   authorLogin: string;
   mergedByLogin: string | null;
+  /** Recorded on the escrow by a release, so the payment points at the code it paid for. */
+  mergeCommitSha?: string | null;
 }
 
 export type FetchPull = (repo: string, prNumber: number) => Promise<PullFacts>;
@@ -55,8 +57,8 @@ export function capsFor(currency: string, configured?: { perBountyMaxMinor: bigi
 export const fetchPullFromGitHub: FetchPull = async (repo, prNumber) => {
   const r = await fetch(`https://api.github.com/repos/${repo}/pulls/${prNumber}`, { headers: { accept: 'application/vnd.github+json', 'user-agent': 'grainlify-payout-signer' } });
   if (!r.ok) throw new Error(`GitHub ${r.status} reading ${repo}#${prNumber}`);
-  const pr = (await r.json()) as { merged: boolean; user: { login: string }; merged_by: { login: string } | null };
-  return { merged: pr.merged === true, authorLogin: pr.user.login, mergedByLogin: pr.merged_by?.login ?? null };
+  const pr = (await r.json()) as { merged: boolean; user: { login: string }; merged_by: { login: string } | null; merge_commit_sha: string | null };
+  return { merged: pr.merged === true, authorLogin: pr.user.login, mergedByLogin: pr.merged_by?.login ?? null, mergeCommitSha: pr.merge_commit_sha ?? null };
 };
 
 export class PayoutSigner {
@@ -86,6 +88,9 @@ export class PayoutSigner {
     const t = approval?.terms;
     if (!t) return refuse('missing approval terms', 400);
 
+    // An approval given for an escrow release is not an approval to pay from
+    // the float, even for the same amount to the same person.
+    if (t.escrow !== undefined) return refuse('this approval is for an escrow release, not a payout from the float', 400);
     const v = verifyApproval(approval, this.cfg.trustedApprovers, now);
     if (!v.ok) return refuse(`approval: ${v.reason}`);
     if (t.network !== this.cfg.network) return refuse(`network ${t.network} is not this signer's network (${this.cfg.network})`);

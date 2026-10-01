@@ -6,9 +6,10 @@ import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Approval } from '../../../../packages/gate/src/approval.ts';
 import type { PayoutJournal } from './journal.ts';
+import type { EscrowAttestor } from './escrow-attestor.ts';
 import type { PayoutSigner } from './payout-signer.ts';
 
-export function createPayoutServer(signer: PayoutSigner, journal: PayoutJournal, token: string): Server {
+export function createPayoutServer(signer: PayoutSigner, journal: PayoutJournal, token: string, attestor?: EscrowAttestor): Server {
   if (token.length < 24) throw new Error('PAYOUT_SIGNER_TOKEN must be at least 24 characters');
   const expected = Buffer.from(`Bearer ${token}`);
   return createServer(async (req, res) => {
@@ -28,12 +29,30 @@ export function createPayoutServer(signer: PayoutSigner, journal: PayoutJournal,
       // Mint addresses are public and this endpoint is behind the same bearer
       // token as everything else here. It reports configuration, never a key.
       if (req.method === 'GET' && req.url === '/v1/config') {
-        return send(200, { network: signer.network(), mints: signer.mints() });
+        return send(200, {
+          network: signer.network(), mints: signer.mints(),
+          escrow: attestor ? { network: attestor.network(), attestor: attestor.address() } : null,
+        });
       }
       if (req.method === 'GET' && req.url === '/v1/payouts') return send(200, { payouts: journal.all() });
       if (req.method === 'POST' && req.url === '/v1/payout/pay') {
         const body = (await readJson(req)) as { approval: Approval };
         const r = await signer.pay(body.approval);
+        return r.ok ? send(200, r) : send(r.status, { error: r.error });
+      }
+      // Funded escrows. Absent until the attestor key is configured, and
+      // then 503 rather than 404, so the agent can tell "not set up" from
+      // "no such route".
+      if (req.method === 'POST' && req.url?.startsWith('/v1/escrow/')) {
+        if (!attestor) return send(503, { error: 'escrow_attestor_not_configured' });
+        const body = (await readJson(req)) as { escrow?: string; contributor?: string; approval?: Approval };
+        const r = req.url === '/v1/escrow/assign'
+          ? await attestor.assign(String(body.escrow ?? ''), String(body.contributor ?? ''))
+          : req.url === '/v1/escrow/unassign'
+            ? await attestor.unassign(String(body.escrow ?? ''))
+            : req.url === '/v1/escrow/release'
+              ? await attestor.release(body.approval as Approval)
+              : { ok: false as const, status: 404, error: 'not found' };
         return r.ok ? send(200, r) : send(r.status, { error: r.error });
       }
       return send(404, { error: 'not found' });

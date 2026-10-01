@@ -19,6 +19,13 @@ export interface PayoutTerms {
   currency: string;
   mint: string;
   network: string;
+  /**
+   * The escrow account, for a maintainer-funded bounty. Absent on a payout
+   * from the agent's own float. Covered by the signature like every other
+   * field, so the payout signer can tell which of its two routes an approval
+   * was given for.
+   */
+  escrow?: string;
 }
 
 export interface Approval {
