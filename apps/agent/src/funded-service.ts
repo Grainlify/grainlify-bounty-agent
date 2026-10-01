@@ -276,7 +276,7 @@ export class FundedService {
    * Safe to call twice: a funder whose page closed after signing comes back
    * and presses Confirm again.
    */
-  async confirm(bountyId: string, login: string, signature: string) {
+  async confirm(bountyId: string, login: string, signature: string | null) {
     const b = await this.asFunder(bountyId, login);
     if ('ok' in b) return b;
     if (b.status !== 'funding') return { ok: true as const, bountyId, state: b.escrow_state, already: true };
@@ -313,6 +313,54 @@ export class FundedService {
     ].join('\n');
     const c = await this.d.gh.comment(b.repo, b.issue_number, body);
     await this.d.db.query('UPDATE bounties SET comment_id = $2 WHERE id = $1', [b.id, c.id]);
+  }
+
+  /**
+   * Whether this person can fund bounties, and on what terms. One call, so
+   * the Maintainer tab shows the funding screen only to somebody who can use
+   * it - everybody when the switch is on, named testers while it is off.
+   */
+  async status(login: string) {
+    const available = await this.d.escrow.enabledFor(login);
+    const mints = this.d.escrow.mints();
+    return {
+      ok: true as const,
+      available,
+      network: this.d.escrow.network(),
+      currencies: Object.entries(mints).map(([currency, m]) => ({
+        currency, decimals: m.decimals, maxMinor: (this.d.caps[currency]?.perBountyMaxMinor ?? 0n).toString(),
+      })),
+      minDeadlineDays: MIN_DEADLINE_DAYS,
+      maxDeadlineDays: MAX_DEADLINE_DAYS,
+      respondDays: RESPOND_DAYS,
+      attestorReady: this.d.attestor !== undefined,
+    };
+  }
+
+  /** The funder taking the escrow back: cancel before anybody was assigned, refund after the deadline. */
+  async reclaim(bountyId: string, login: string) {
+    const b = await this.asFunder(bountyId, login);
+    if ('ok' in b) return b;
+    const chain = await this.d.escrow.readChain(b.escrow_pubkey);
+    if (!chain) return fail(409, 'escrow_closed', 'the escrow is already closed');
+    const pastDeadline = this.now().getTime() >= new Date(b.deadline_at).getTime();
+    const kind = !chain.everAssigned && chain.state === 'Funded' ? 'cancel' as const : pastDeadline ? 'refund' as const : null;
+    if (!kind) {
+      return fail(409, 'not_yet', `somebody has been assigned, so the escrow can only come back after its deadline, ${new Date(b.deadline_at).toISOString()}`);
+    }
+    const transaction = await this.d.escrow.funderReclaimTransaction(b.escrow_pubkey, kind);
+    return { ok: true as const, kind, transaction, funderWallet: b.funder_wallet };
+  }
+
+  /** After the funder's wallet sent a cancel or refund: read the chain and record what it says. */
+  async reclaimConfirm(bountyId: string, login: string) {
+    const b = await this.asFunder(bountyId, login);
+    if ('ok' in b) return b;
+    const what = await this.reconcileOne(bountyId);
+    if (what !== 'cancelled' && what !== 'refunded') {
+      return fail(409, 'escrow_still_open', 'the escrow is still open; wait a moment and check again');
+    }
+    return { ok: true as const, outcome: what };
   }
 
   // ------------------------------------------------------------ the funder's view
@@ -904,7 +952,7 @@ export class FundedService {
     const r = await this.d.db.query<{ funded: number; unassigned_before_pr: number; disputes: number }>(
       `SELECT
          (SELECT count(*) FROM bounties b JOIN bounty_escrows e ON e.bounty_id = b.id
-           WHERE lower(b.funded_by) = lower($1) AND e.fund_tx IS NOT NULL)::int AS funded,
+           WHERE lower(b.funded_by) = lower($1) AND e.state NOT IN ('funding','failed'))::int AS funded,
          (SELECT count(*) FROM bounty_assignments a JOIN bounties b ON b.id = a.bounty_id
            WHERE lower(b.funded_by) = lower($1) AND a.status = 'released_voluntary' AND a.qualifying_pr_number IS NULL
              AND (lower(a.released_by) = lower($1) OR a.unassigned_on_chain_directly))::int AS unassigned_before_pr,

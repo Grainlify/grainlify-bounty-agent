@@ -374,13 +374,12 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           // never answers a question about whether a bounty exists.
           if (f.action.startsWith('escrow_')) {
             if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
-            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+            if (!(await d.escrow.enabledFor(f.login))) return reply(403, { error: 'funded_bounties_disabled' });
           }
           // A quote is arithmetic on an amount, about no bounty in particular.
           switch (f.action) {
             case 'escrow_quote': {
               if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
-              if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
               let amount: bigint;
               try { amount = BigInt(String(body.amountMinor ?? '')); }
               catch { return reply(400, { error: 'bad_amount' }); }
@@ -425,9 +424,17 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
                     funderWallet: String(body.funderWallet ?? ''), verifiedProject: body.verifiedProject === true,
                   });
                 }
+                case 'funded_status':
+                  return fd.status(f.login);
                 case 'funded_confirm':
-                  if (!sig) return { ok: false as const, status: 400, error: 'signature_required', detail: 'the funding transaction signature is required' };
-                  return fd.confirm(f.subject, f.login, sig);
+                  // The signature is optional: a funder whose page closed
+                  // after signing comes back without it, and the chain is
+                  // what is believed either way.
+                  return fd.confirm(f.subject, f.login, sig || null);
+                case 'funded_reclaim':
+                  return fd.reclaim(f.subject, f.login);
+                case 'funded_reclaim_confirm':
+                  return fd.reclaimConfirm(f.subject, f.login);
                 case 'funded_view':
                   return fd.view(f.subject, f.login);
                 case 'funded_assign_prepare':
@@ -508,7 +515,6 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             }
             case 'escrow_confirm': {
               if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
-              if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
               const sig = String(body.signature ?? '');
               if (!sig) return reply(400, { error: 'signature_required' });
               if (d.funded) {

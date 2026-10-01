@@ -454,6 +454,57 @@ describe.skipIf(!dbUrl)('funded bounties', () => {
     });
   });
 
+  describe('the funder\'s screens', () => {
+    it('says who can fund and on what terms, testers included while the switch is off', async () => {
+      await setSwitch(false);
+      expect(await funded.status('owen')).toMatchObject({ available: false });
+      expect(await funded.status('tester-tia')).toMatchObject({
+        available: true, network: 'solana-devnet', minDeadlineDays: 7, respondDays: 7,
+        currencies: [{ currency: 'USDC', decimals: 6, maxMinor: '50000000' }],
+      });
+    });
+
+    it('confirms a funding without the signature, for a funder whose page closed after signing', async () => {
+      const p = await funded.prepare(prepareInput());
+      if (!p.ok) throw new Error(p.error);
+      const [pda] = escrowPda(Buffer.from(p.bountyId.replace(/-/g, ''), 'hex'));
+      chain.accounts.set(pda.toBase58(), encodeEscrow({
+        bountyId: Buffer.from(p.bountyId.replace(/-/g, ''), 'hex'), funder: funderWallet, amount: 50_000_000n,
+        feeAmount: BigInt(p.feeAmountMinor), mode: 0, state: 0, contributor: null, everAssigned: false,
+        deadline: Math.floor(deadline().getTime() / 1000),
+      }));
+      expect(await funded.confirm(p.bountyId, 'owen', null)).toMatchObject({ ok: true, already: false });
+      expect(await funded.profile('owen')).toMatchObject({ bountiesFunded: 1 });
+    });
+
+    it('offers cancel before anybody was assigned, and nothing but refund-after-deadline once somebody was', async () => {
+      const { bountyId } = await fundedBounty();
+      expect(await funded.reclaim(bountyId, 'owen')).toMatchObject({ ok: true, kind: 'cancel' });
+      await person(1, 'jotel-dev');
+      await apply(bountyId, 1, 'jotel-dev');
+      await funded.runDraw(bountyId, 'owen', false);
+      await funded.unassign(bountyId, 'owen', '');
+      // Unassigned again, but somebody HAS been assigned: no cancelling out.
+      expect(await funded.reclaim(bountyId, 'owen')).toMatchObject({ ok: false, error: 'not_yet' });
+      clock = new Date(deadline().getTime() + 86_400_000);
+      expect(await funded.reclaim(bountyId, 'owen')).toMatchObject({ ok: true, kind: 'refund' });
+    });
+
+    it('shows the contributor the wallet they will be paid to, and a proposal waiting for them', async () => {
+      const { bountyId } = await fundedBounty();
+      const wallet = await person(1, 'jotel-dev');
+      await apply(bountyId, 1, 'jotel-dev');
+      await funded.runDraw(bountyId, 'owen', false);
+      await openPr(bountyId, 1);
+      await funded.propose(bountyId, 'owen', 900, 'scope changed');
+      const mine = await draw.assignmentsForUser(1);
+      expect(mine[bountyId]).toMatchObject({
+        status: 'pr_submitted',
+        funded: { wallet, prNumber: 58, proposal: { proposedBy: 'funder', proposerLogin: 'owen', reason: 'scope changed', status: 'pending' } },
+      });
+    });
+  });
+
   describe('the chain wins', () => {
     it('an escrow cancelled before anybody was assigned cancels the bounty', async () => {
       const { bountyId, escrowAddress } = await fundedBounty();

@@ -13,7 +13,7 @@ import { getAssociatedTokenAddress } from '@solana/spl-token';
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import {
-  MODE_DRAW, MODE_SELF, decodeEscrow, escrowPda, vaultPda, ixInitialize, ixAssign, ixUnassign,
+  MODE_DRAW, MODE_SELF, decodeEscrow, escrowPda, vaultPda, ixInitialize, ixAssign, ixUnassign, ixCancel, ixRefund,
 } from './escrow-ix.ts';
 import { intOf, boolOf } from '../../../packages/gate/src/draw-config.ts';
 
@@ -133,6 +133,21 @@ export class EscrowService {
     const funder = new PublicKey(funderWallet);
     const tx = new Transaction().add(ixUnassign({ signer: funder, escrow: new PublicKey(escrowPubkey) }));
     return this.unsigned(tx, funder);
+  }
+
+  /**
+   * Taking the money back, which only the funder can do and the program
+   * decides when: cancel before anybody was ever assigned, refund once the
+   * deadline has passed. Grainlify builds the bytes and signs nothing.
+   */
+  async funderReclaimTransaction(escrowPubkey: string, kind: 'cancel' | 'refund') {
+    const e = await this.readChain(escrowPubkey);
+    if (!e) throw new Error('the escrow is not on-chain');
+    const escrow = new PublicKey(escrowPubkey);
+    const [vault] = vaultPda(escrow);
+    const funderToken = await getAssociatedTokenAddress(e.mint, e.funder);
+    const ix = (kind === 'cancel' ? ixCancel : ixRefund)({ funder: e.funder, escrow, vault, funderToken, mint: e.mint });
+    return this.unsigned(new Transaction().add(ix), e.funder);
   }
 
   private async unsigned(tx: Transaction, feePayer: PublicKey) {
@@ -260,7 +275,7 @@ export class EscrowService {
    * what was quoted. A funding that did not happen, or happened on different
    * terms, leaves the row in `funding` and returns a refusal.
    */
-  async confirmFunding(bountyId: string, signature: string) {
+  async confirmFunding(bountyId: string, signature: string | null) {
     const row = await this.d.db.query<{
       id: string; escrow_pubkey: string; amount_minor: string; fee_amount_minor: string; state: string;
     }>('SELECT id, escrow_pubkey, amount_minor, fee_amount_minor, state FROM bounty_escrows WHERE bounty_id = $1', [bountyId]);

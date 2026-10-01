@@ -404,12 +404,44 @@ export class DrawService {
 
   /** Bounties this contributor currently holds, so the page can say so. */
   async assignmentsForUser(githubUserId: number) {
-    const r = await this.d.db.query<{ bounty_id: string; status: string; stale_at: Date }>(
-      `SELECT bounty_id, status, stale_at FROM bounty_assignments
-        WHERE github_user_id = $1 AND status IN ('active','pr_submitted')`,
+    const r = await this.d.db.query<{
+      bounty_id: string; status: string; stale_at: Date; funded: boolean; wallet: string | null; pr: number | null;
+      p_id: string | null; p_by: string | null; p_login: string | null; p_reason: string | null; p_status: string | null;
+      p_respond_by: Date | null; p_response: string | null;
+    }>(
+      // On a funded bounty the contributor also needs: which wallet the
+      // escrow will pay, and any proposal to end the assignment that is
+      // waiting for them or that they made.
+      `SELECT a.bounty_id, a.status, a.stale_at, (b.funded_by IS NOT NULL) AS funded, e.contributor_wallet AS wallet,
+              a.qualifying_pr_number AS pr,
+              p.id AS p_id, p.proposed_by AS p_by, p.proposer_login AS p_login, p.reason AS p_reason, p.status AS p_status,
+              p.respond_by AS p_respond_by, p.response AS p_response
+         FROM bounty_assignments a
+         JOIN bounties b ON b.id = a.bounty_id
+         LEFT JOIN bounty_escrows e ON e.bounty_id = b.id AND b.funded_by IS NOT NULL
+         LEFT JOIN LATERAL (SELECT * FROM bounty_unassign_proposals x WHERE x.assignment_id = a.id
+                             ORDER BY x.created_at DESC LIMIT 1) p ON true
+        WHERE a.github_user_id = $1 AND a.status IN ('active','pr_submitted')`,
       [githubUserId],
     );
-    return Object.fromEntries(r.rows.map((x) => [x.bounty_id, { status: x.status, staleAt: new Date(x.stale_at).toISOString() }]));
+    return Object.fromEntries(r.rows.map((x) => [x.bounty_id, {
+      status: x.status,
+      staleAt: new Date(x.stale_at).toISOString(),
+      ...(x.funded
+        ? {
+            funded: {
+              wallet: x.wallet,
+              prNumber: x.pr,
+              proposal: x.p_id
+                ? {
+                    id: x.p_id, proposedBy: x.p_by, proposerLogin: x.p_login, reason: x.p_reason, status: x.p_status,
+                    respondBy: x.p_respond_by ? new Date(x.p_respond_by).toISOString() : null, response: x.p_response,
+                  }
+                : null,
+            },
+          }
+        : {}),
+    }]));
   }
 
   /**
