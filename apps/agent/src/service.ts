@@ -24,6 +24,12 @@ import { assistantText, clampPriceMinor, parsePricing, parseReview, pricingMessa
 
 export interface PayoutSignerApi {
   pay(approval: Approval): Promise<{ ok: true; signature: string } | { ok: false; status: number; error: string }>;
+  /**
+   * Release a funded bounty's escrow to the contributor it records. The same
+   * human approval as a payout, and the signer re-reads the escrow and the
+   * merge itself; it never moves the agent's float.
+   */
+  releaseEscrow?(approval: Approval): Promise<{ ok: true; signature: string } | { ok: false; status: number; error: string }>;
 }
 
 export interface Deps {
@@ -493,6 +499,10 @@ export class BountyService {
       if (recorded.rowCount) await this.audit('agent', 'assignment.pr_recorded', String(b.id), { assignmentId: recorded.rows[0].id, prNumber: pr.number, source: 'webhook' });
       const done = await this.d.db.query(`SELECT 1 FROM reviews WHERE submission_id = $1 AND head_sha = $2`, [submissionId, pr.headSha]);
       if (done.rowCount) continue; // one review per commit
+      // Not on funded bounties. The review is advisory and bought with the
+      // agent's own inference budget, whose lifetime ceiling is fixed; a
+      // maintainer's escrow does not get to spend it.
+      if (b.funded_by) continue;
       await this.reviewSubmission(fullName, b, submissionId, pr);
     }
   }
@@ -572,6 +582,9 @@ export class BountyService {
       }
       const gate = await this.runGate(fullName, repo!, b, pr);
       const payoutId = randomUUID();
+      // A funded bounty pays the address the escrow recorded at assignment,
+      // because that is the only address the program will pay; the gate's
+      // wallet fact is that address for a funded bounty.
       const wallet = gate.facts.wallet?.address ?? '';
       await this.d.db.query(
         `INSERT INTO payouts (id, bounty_id, submission_id, recipient, recipient_github_user_id, amount_minor, currency, mint, network, gate_result, status)
@@ -598,9 +611,11 @@ export class BountyService {
       this.d.gh.getUser(fullName, pr.authorLogin).catch(() => null),
       this.d.db.query(`SELECT address FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`, [pr.authorId]),
       this.d.db.query(`SELECT 1 FROM payouts WHERE bounty_id = $1 AND status <> 'refused'`, [b.id]),
+      // Per network as well as currency: test tokens released on devnet are
+      // not money and must not use up a real day's cap.
       this.d.db.query(
-        `SELECT COALESCE(SUM(amount_minor), 0)::text AS s FROM payouts WHERE currency = $1 AND status NOT IN ('refused','failed') AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
-        [b.currency],
+        `SELECT COALESCE(SUM(amount_minor), 0)::text AS s FROM payouts WHERE currency = $1 AND network = $2 AND status NOT IN ('refused','failed') AND created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'`,
+        [b.currency, b.network],
       ),
       // Who the draw gave this bounty to. Only a live assignment counts: one
       // that went stale or was released is not a claim on the money.
@@ -611,6 +626,10 @@ export class BountyService {
         [b.id],
       ),
     ]);
+    const escrow = b.funded_by
+      ? (await this.d.db.query<{ state: string; contributor_wallet: string | null }>(
+          'SELECT state, contributor_wallet FROM bounty_escrows WHERE bounty_id = $1', [b.id])).rows[0] ?? { state: 'missing', contributor_wallet: null }
+      : null;
     const facts: GateFacts = {
       repo: {
         fullName,
@@ -626,7 +645,10 @@ export class BountyService {
       },
       // The author must be who GitHub says opened the PR; a lookup for a different id is treated as a failed lookup.
       author: author && author.id === pr.authorId ? { createdAt: author.createdAt } : null,
-      wallet: wallet.rows[0] ? { address: String(wallet.rows[0].address) } : null,
+      wallet: escrow
+        ? (escrow.contributor_wallet ? { address: escrow.contributor_wallet } : null)
+        : wallet.rows[0] ? { address: String(wallet.rows[0].address) } : null,
+      ...(escrow ? { funded: { escrowState: escrow.state, contributorWallet: escrow.contributor_wallet } } : {}),
       assignment: assignment.rows[0]
         ? { githubUserId: Number(assignment.rows[0].github_user_id), githubLogin: String(assignment.rows[0].github_login) }
         : null,
@@ -640,8 +662,10 @@ export class BountyService {
 
   async payoutTerms(payoutId: string): Promise<{ terms: PayoutTerms; status: string; gate: GateResult } | null> {
     const r = await this.d.db.query(
-      `SELECT p.*, b.issue_number, s.pr_number, s.author_login, r.owner, r.name FROM payouts p
-       JOIN bounties b ON b.id = p.bounty_id JOIN submissions s ON s.id = p.submission_id JOIN repos r ON r.id = b.repo_id WHERE p.id = $1`,
+      `SELECT p.*, b.issue_number, s.pr_number, s.author_login, r.owner, r.name, e.escrow_pubkey FROM payouts p
+       JOIN bounties b ON b.id = p.bounty_id JOIN submissions s ON s.id = p.submission_id JOIN repos r ON r.id = b.repo_id
+       LEFT JOIN bounty_escrows e ON e.bounty_id = b.id AND b.funded_by IS NOT NULL
+       WHERE p.id = $1`,
       [payoutId],
     );
     const p = r.rows[0] as Record<string, unknown> | undefined;
@@ -652,6 +676,9 @@ export class BountyService {
       terms: {
         payout_id: String(p.id), bounty_id: String(p.bounty_id), repo: `${p.owner}/${p.name}`, issue_number: Number(p.issue_number), pr_number: Number(p.pr_number),
         author_login: String(p.author_login), recipient: String(p.recipient), amount_minor: String(p.amount_minor), currency: String(p.currency), mint: String(p.mint), network: String(p.network),
+        // Signed into the approval, so an approval for an escrow release can
+        // never be presented as a payout from the float, or the other way round.
+        ...(p.escrow_pubkey ? { escrow: String(p.escrow_pubkey) } : {}),
       },
     };
   }
@@ -669,7 +696,9 @@ export class BountyService {
     if (claimed.rowCount !== 1) throw new Error('payout was approved concurrently');
     await this.audit(approval.approver, 'payout.approved', payoutId, { terms: view.terms });
 
-    const res = await this.d.payoutSigner.pay(approval);
+    const fromEscrow = typeof view.terms.escrow === 'string';
+    if (fromEscrow && !this.d.payoutSigner.releaseEscrow) throw new Error('this agent cannot release escrows: the payout signer client has no escrow route');
+    const res = fromEscrow ? await this.d.payoutSigner.releaseEscrow!(approval) : await this.d.payoutSigner.pay(approval);
     if (!res.ok) {
       const unknown = res.status >= 500 && res.status !== 503;
       await this.d.db.query(`UPDATE payouts SET status = $2, error = $3, updated_at = now() WHERE id = $1`, [payoutId, unknown ? 'submitted' : 'failed', res.error]);
@@ -678,7 +707,16 @@ export class BountyService {
     }
     await this.d.db.query(`UPDATE payouts SET status = 'confirmed', tx_signature = $2, updated_at = now() WHERE id = $1`, [payoutId, res.signature]);
     await this.d.db.query(`UPDATE bounties SET status = 'paid', updated_at = now() WHERE id = $1`, [view.terms.bounty_id]);
-    await this.audit('payout-signer', 'payout.confirmed', payoutId, { tx: res.signature });
+    if (fromEscrow) {
+      const e = await this.d.db.query<{ id: string }>(
+        `UPDATE bounty_escrows SET state = 'released', release_tx = $2, updated_at = now() WHERE bounty_id = $1 RETURNING id`,
+        [view.terms.bounty_id, res.signature]);
+      if (e.rows[0]) {
+        await this.d.db.query('INSERT INTO bounty_escrow_events (escrow_id, kind, tx, detail) VALUES ($1,$2,$3,$4)',
+          [e.rows[0].id, 'released', res.signature, JSON.stringify({ payoutId, recipient: view.terms.recipient })]);
+      }
+    }
+    await this.audit('payout-signer', 'payout.confirmed', payoutId, { tx: res.signature, escrow: view.terms.escrow ?? null });
     // Emitted after the transaction is confirmed, never on submission: "you
     // have been paid" must not arrive for a payment that then fails.
     const paidTo = await this.d.db.query<{ author_github_user_id: string }>(

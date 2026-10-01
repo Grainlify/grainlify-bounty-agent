@@ -27,7 +27,12 @@ export type EventKind =
   | 'bounty_review_posted'
   | 'bounty_unassigned'
   | 'bounty_deadline_changed'
-  | 'bounty_paid';
+  | 'bounty_paid'
+  // Funded bounties: assigned by the funder rather than drawn, and the
+  // two-sided unassignment once a pull request is open.
+  | 'bounty_funded_assigned'
+  | 'bounty_unassign_proposed'
+  | 'bounty_unassign_refused';
 
 export interface BountyEvent {
   kind: EventKind;
@@ -80,4 +85,8 @@ export const dedupe = {
   // Keyed to the assignment AND the new deadline, so moving a deadline twice
   // tells the contributor twice, and moving it to the same value does not.
   deadlineChanged: (assignmentId: string, newAt: string) => `deadline_changed:${assignmentId}:${newAt}`,
+  fundedAssigned: (assignmentId: string) => `funded_assigned:${assignmentId}`,
+  // Keyed to the proposal: one proposal, one message to the other side.
+  unassignProposed: (proposalId: string) => `unassign_proposed:${proposalId}`,
+  unassignRefused: (proposalId: string) => `unassign_refused:${proposalId}`,
 };

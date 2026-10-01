@@ -166,10 +166,10 @@ export class DrawService {
 
     const b = await this.d.db.query<{
       id: string; status: string; repo_id: string; owner: string; name: string;
-      applications_close_at: Date | null; waived: string[]; is_test: boolean;
+      applications_close_at: Date | null; waived: string[]; is_test: boolean; funded_by: string | null;
     }>(
       `SELECT b.id, b.status, b.repo_id, r.owner, r.name, b.applications_close_at,
-              b.waived_eligibility_rules AS waived, b.is_test
+              b.waived_eligibility_rules AS waived, b.is_test, b.funded_by
          FROM bounties b JOIN repos r ON r.id = b.repo_id
         WHERE b.id = $1`,
       [input.bountyId],
@@ -181,6 +181,19 @@ export class DrawService {
     }
     if (!bounty.applications_close_at || new Date(bounty.applications_close_at) <= now) {
       return { ok: false, status: 409, error: 'applications_closed', detail: 'applications for this bounty have closed' };
+    }
+    if (bounty.funded_by) {
+      // A funded bounty has no window: applications stay open until the
+      // funder assigns it or draws. While somebody holds it there is nothing
+      // to apply for.
+      if (bounty.funded_by.toLowerCase() === input.githubLogin.toLowerCase()) {
+        return { ok: false, status: 403, error: 'own_bounty', detail: 'you funded this bounty, so you cannot apply for it' };
+      }
+      const held = await this.d.db.query(
+        `SELECT 1 FROM bounty_assignments WHERE bounty_id = $1 AND status IN ('active','pr_submitted')`, [input.bountyId]);
+      if (held.rowCount) {
+        return { ok: false, status: 409, error: 'assigned', detail: 'somebody holds this bounty at the moment, so it is not taking applications' };
+      }
     }
 
     const repo = `${bounty.owner}/${bounty.name}`;
@@ -417,11 +430,15 @@ export class DrawService {
    * bounty: the list is small and the answers are per repo.
    */
   async bountiesForMaintainer(login: string) {
-    const r = await this.d.db.query<{ id: string; owner: string; name: string; issue_number: number; funded_by: string | null }>(
-      `SELECT b.id, r.owner, r.name, b.issue_number, b.funded_by
+    const r = await this.d.db.query<{ id: string; owner: string; name: string; issue_number: number; funded_by: string | null; status: string; issue_title: string | null }>(
+      // A bounty still being funded is the funder's alone to see: it is not
+      // public, and the only thing to do with it is finish or abandon funding.
+      `SELECT b.id, r.owner, r.name, b.issue_number, b.funded_by, b.status, b.issue_title
          FROM bounties b JOIN repos r ON r.id = b.repo_id
         WHERE b.status IN ('posted','in_review','payable','paid')
+           OR (b.status = 'funding' AND lower(b.funded_by) = lower($1))
         ORDER BY b.created_at DESC LIMIT 200`,
+      [login],
     );
     const repos = [...new Set(r.rows.map((x) => `${x.owner}/${x.name}`))];
     const allowed = new Set<string>();
@@ -437,7 +454,14 @@ export class DrawService {
     }
     return r.rows
       .filter((x) => allowed.has(`${x.owner}/${x.name}`.toLowerCase()) || (x.funded_by ?? '').toLowerCase() === login.toLowerCase())
-      .map((x) => ({ bountyId: x.id, repo: `${x.owner}/${x.name}`, issueNumber: x.issue_number }));
+      .map((x) => ({
+        bountyId: x.id, repo: `${x.owner}/${x.name}`, issueNumber: x.issue_number, issueTitle: x.issue_title,
+        status: x.status,
+        // Which controls apply. A funded bounty is the funder's to run, and
+        // the agent's own draw controls refuse it.
+        funded: x.funded_by !== null,
+        youFunded: (x.funded_by ?? '').toLowerCase() === login.toLowerCase(),
+      }));
   }
 
   /**
@@ -610,7 +634,13 @@ export class DrawService {
    */
   async runDrawFor(
     bountyId: string,
-    opts: { triggeredBy: string; simulate?: boolean; staleHours?: number },
+    opts: {
+      triggeredBy: string; simulate?: boolean; staleHours?: number;
+      /** A fixed deadline instead of one computed from hours: a funded bounty's is its escrow deadline. */
+      staleAt?: Date;
+      /** Only applicants with a live wallet link: a funded draw has to name an address on-chain. */
+      requireWallet?: boolean;
+    },
   ): Promise<DrawOutcome | { error: string; detail: string }> {
     const simulate = opts.simulate === true;
     const cfg = await this.config();
@@ -647,8 +677,10 @@ export class DrawService {
          FROM bounty_applications
         WHERE bounty_id = $1 AND status IN ('applied','lost')
           AND ($2::text IS NULL OR lower(github_login) <> lower($2))
+          AND (NOT $3::boolean OR EXISTS (SELECT 1 FROM wallet_links w
+                                           WHERE w.github_user_id = bounty_applications.github_user_id AND w.revoked_at IS NULL))
         ORDER BY created_at`,
-      [bountyId, excluded],
+      [bountyId, excluded, opts.requireWallet === true],
     );
     const history = await this.historyFor(a.rows.map((x) => Number(x.github_user_id)));
 
@@ -714,9 +746,10 @@ export class DrawService {
       const staleHours = opts.staleHours ?? intOf(cfg.assignment_stale_hours, 72);
       const asg = await this.d.db.query<{ id: string; stale_at: Date }>(
         `INSERT INTO bounty_assignments (bounty_id, draw_id, github_user_id, github_login, status, assigned_at, stale_at)
-         VALUES ($1,$2,$3,$4,'active',$5,$5::timestamptz + ($6 || ' hours')::interval)
+         VALUES ($1,$2,$3,$4,'active',$5,COALESCE($7::timestamptz, $5::timestamptz + ($6 || ' hours')::interval))
          RETURNING id, stale_at`,
-        [bountyId, drawId, result.winner.githubUserId, result.winner.githubLogin, now.toISOString(), String(staleHours)],
+        [bountyId, drawId, result.winner.githubUserId, result.winner.githubLogin, now.toISOString(), String(staleHours),
+         opts.staleAt ? opts.staleAt.toISOString() : null],
       );
       assignmentId = asg.rows[0]!.id;
       staleAt = new Date(asg.rows[0]!.stale_at).toISOString();
@@ -1144,6 +1177,10 @@ export class DrawService {
          JOIN bounties b ON b.id = a.bounty_id
          JOIN repos r ON r.id = b.repo_id
         WHERE a.status = 'active'
+          -- A funded bounty's assignment has no clock of its own: before a
+          -- pull request the funder ends it, after one the escrow deadline
+          -- decides. Nobody is warned or released here for those.
+          AND b.funded_by IS NULL
           AND a.stale_at > $1
           AND a.stale_at <= $1::timestamptz + ($2 || ' hours')::interval
           -- Never "open a pull request" to somebody who has one open.
@@ -1186,6 +1223,7 @@ export class DrawService {
                                                WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id),
               updated_at = now()
         WHERE a.status = 'active' AND a.stale_at <= $1
+          AND NOT EXISTS (SELECT 1 FROM bounties fb WHERE fb.id = a.bounty_id AND fb.funded_by IS NOT NULL)
           AND NOT EXISTS (SELECT 1 FROM submissions s
                            WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id
                              AND s.state = 'open')
@@ -1242,6 +1280,8 @@ export class DrawService {
         WHERE b.status = 'posted'
           -- Unassigned by somebody, and waiting for them to redraw it.
           AND NOT b.awaiting_redraw
+          -- The funder draws a funded bounty, when they choose. Never this.
+          AND b.funded_by IS NULL
           AND b.applications_close_at IS NOT NULL
           AND b.applications_close_at <= $1
           AND NOT EXISTS (SELECT 1 FROM bounty_assignments a WHERE a.bounty_id = b.id AND a.status IN ('active','pr_submitted'))`,

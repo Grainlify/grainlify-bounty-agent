@@ -26,8 +26,23 @@ export interface EscrowDeps {
   attestor: PublicKey;
   /** Where the platform fee lands. Fixed on each escrow at funding. */
   feeDestination: PublicKey;
+  /**
+   * Which chain escrows live on, and what they may hold. Separate from where
+   * the agent's own payouts go, so escrows can be run on devnet with test
+   * tokens while real payouts stay on mainnet.
+   */
+  network?: string;
+  mints?: Record<string, { mint: string; decimals: number }>;
+  /**
+   * GitHub logins that can use funded bounties while the switch is off.
+   * From the environment, not the settings table: widening who can put money
+   * into escrows is not something the admin screen should be able to do.
+   */
+  testers?: string[];
   now?: () => Date;
 }
+
+export type ChainEscrow = ReturnType<typeof decodeEscrow>;
 
 export interface Quote {
   amountMinor: bigint;
@@ -79,6 +94,74 @@ export class EscrowService {
     return boolOf((await this.config()).funded_bounties_enabled, false);
   }
 
+  /** On for everyone, or on for this person because they are testing it. */
+  async enabledFor(login: string): Promise<boolean> {
+    if (await this.enabled()) return true;
+    return (this.d.testers ?? []).some((t) => t.toLowerCase() === login.toLowerCase());
+  }
+
+  network(): string {
+    return this.d.network ?? 'solana-devnet';
+  }
+
+  mints(): Record<string, { mint: string; decimals: number }> {
+    return this.d.mints ?? {};
+  }
+
+  attestor(): string {
+    return this.d.attestor.toBase58();
+  }
+
+  /** The escrow as the chain holds it now, or null once it is closed (released or refunded) or never existed. */
+  async readChain(escrowPubkey: string): Promise<ChainEscrow | null> {
+    const info = await this.d.connection.getAccountInfo(new PublicKey(escrowPubkey), 'confirmed');
+    return info ? decodeEscrow(Buffer.from(info.data)) : null;
+  }
+
+  /**
+   * Unsigned transactions for the funder's own wallet, in self-assign mode.
+   * The program refuses these from anybody but the funder, so building them
+   * for anybody else would only produce a transaction that fails.
+   */
+  async funderAssignTransaction(escrowPubkey: string, funderWallet: string, contributorWallet: string) {
+    const funder = new PublicKey(funderWallet);
+    const tx = new Transaction().add(ixAssign({ signer: funder, escrow: new PublicKey(escrowPubkey), contributor: new PublicKey(contributorWallet) }));
+    return this.unsigned(tx, funder);
+  }
+
+  async funderUnassignTransaction(escrowPubkey: string, funderWallet: string) {
+    const funder = new PublicKey(funderWallet);
+    const tx = new Transaction().add(ixUnassign({ signer: funder, escrow: new PublicKey(escrowPubkey) }));
+    return this.unsigned(tx, funder);
+  }
+
+  private async unsigned(tx: Transaction, feePayer: PublicKey) {
+    tx.feePayer = feePayer;
+    tx.recentBlockhash = (await this.d.connection.getLatestBlockhash('confirmed')).blockhash;
+    return tx.serialize({ requireAllSignatures: false, verifySignatures: false }).toString('base64');
+  }
+
+  /** Record what the chain now says about who is assigned. Never called on a caller's word alone. */
+  async recordAssigned(bountyId: string, contributorWallet: string, tx: string | null) {
+    const r = await this.d.db.query<{ id: string }>(
+      `UPDATE bounty_escrows SET state = 'assigned', contributor_wallet = $2, assign_tx = $3, updated_at = now()
+        WHERE bounty_id = $1 RETURNING id`, [bountyId, contributorWallet, tx]);
+    if (r.rows[0]) await this.event(r.rows[0].id, 'assigned', tx, { contributor: contributorWallet });
+  }
+
+  async recordUnassigned(bountyId: string, tx: string | null, detail: Record<string, unknown> = {}) {
+    const r = await this.d.db.query<{ id: string }>(
+      `UPDATE bounty_escrows SET state = 'funded', contributor_wallet = NULL, updated_at = now()
+        WHERE bounty_id = $1 RETURNING id`, [bountyId]);
+    if (r.rows[0]) await this.event(r.rows[0].id, 'unassigned', tx, detail);
+  }
+
+  async recordClosed(bountyId: string, state: 'refunded', detail: Record<string, unknown> = {}) {
+    const r = await this.d.db.query<{ id: string }>(
+      `UPDATE bounty_escrows SET state = $2, updated_at = now() WHERE bounty_id = $1 RETURNING id`, [bountyId, state]);
+    if (r.rows[0]) await this.event(r.rows[0].id, state, null, detail);
+  }
+
   async quoteFor(amountMinor: bigint): Promise<Quote> {
     const cfg = await this.config();
     return quote(
@@ -105,12 +188,20 @@ export class EscrowService {
     mode: AssignmentMode;
     createdBy: string;
   }) {
-    if (!(await this.enabled())) {
+    if (!(await this.enabledFor(input.createdBy))) {
       return { ok: false as const, error: 'funded_bounties_disabled' };
     }
-    const existing = await this.d.db.query('SELECT id, state FROM bounty_escrows WHERE bounty_id = $1', [input.bountyId]);
-    if (existing.rowCount) {
-      return { ok: false as const, error: 'escrow_exists', detail: `this bounty already has an escrow in state ${existing.rows[0]!.state}` };
+    const existing = await this.d.db.query<{ id: string; state: string; escrow_pubkey: string }>(
+      'SELECT id, state, escrow_pubkey FROM bounty_escrows WHERE bounty_id = $1', [input.bountyId]);
+    if (existing.rows[0]) {
+      // A funding that was prepared and never signed can be prepared again,
+      // with new terms. One that reached the chain cannot: that money is
+      // locked under these terms, and only confirming it makes sense.
+      const e = existing.rows[0];
+      if (e.state !== 'funding' || (await this.readChain(e.escrow_pubkey))) {
+        return { ok: false as const, error: 'escrow_exists', detail: `this bounty already has an escrow in state ${e.state}` };
+      }
+      await this.d.db.query('DELETE FROM bounty_escrows WHERE id = $1', [e.id]);
     }
     if (input.deadline <= this.now()) {
       return { ok: false as const, error: 'deadline_in_past' };

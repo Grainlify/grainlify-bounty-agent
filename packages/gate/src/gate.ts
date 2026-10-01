@@ -41,6 +41,14 @@ export interface GateFacts {
   bountyAlreadyHasPayout: boolean;
   /** Sum of payouts (any status except refused/failed) created today, same currency, minor units. */
   paidTodayMinor: bigint;
+  /**
+   * Present only for a maintainer-funded bounty. The money is in an escrow the
+   * funder locked, so the repository does not have to be one the agent posts
+   * its own bounties on; what has to be true instead is that the escrow is
+   * holding the funds for an assigned contributor. Read from the chain mirror,
+   * and the payout signer reads the chain itself before it signs.
+   */
+  funded?: { escrowState: string; contributorWallet: string | null };
 }
 
 export interface GatePolicy {
@@ -49,6 +57,8 @@ export interface GatePolicy {
   minAccountAgeDays: number;
   /** Networks payouts may use right now, e.g. ['solana-devnet'] during P2. */
   allowedNetworks: string[];
+  /** Networks a funded bounty's escrow may be released on. Separate, so devnet escrows can be run while payouts are on mainnet. */
+  fundedNetworks?: string[];
 }
 
 export interface GateCheck {
@@ -70,20 +80,32 @@ export function evaluateGate(f: GateFacts, p: GatePolicy, now: Date): GateResult
   const check = (name: string, pass: boolean, detail: string) => checks.push({ name, pass, detail });
 
   check('repo_allowlisted', f.repo.allowlisted && f.repo.enabled, `${f.repo.fullName}: allowlisted=${f.repo.allowlisted}, enabled=${f.repo.enabled}`);
+  if (f.funded) {
+    // A funded bounty is paid from the funder's escrow, not from the agent's
+    // float, so the question is not whether the agent posts bounties here but
+    // whether the escrow is holding the money for somebody.
+    const held = f.funded.escrowState === 'assigned' && f.funded.contributorWallet !== null;
+    check('escrow_holds_funds', held, held
+      ? `escrow is assigned to ${f.funded.contributorWallet}`
+      : `escrow is ${f.funded.escrowState}${f.funded.contributorWallet ? '' : ' with no contributor recorded'}`);
+  }
   // Checked again here, having already been checked when the bounty was
   // created. Deliberately not "already validated upstream": a project can be
   // switched off, or lose its verification, between a bounty being posted and
   // a pull request being merged weeks later - and this is the check that runs
   // at the moment money would actually move.
-  const repoVerdict = repoMayHaveBounties({
-    fullName: f.repo.fullName,
-    enabled: f.repo.allowlisted && f.repo.enabled,
-    bountiesEnabled: f.repo.bountiesEnabled,
-    registeredProject: f.repo.registeredProject,
-  });
-  check('repo_may_have_bounties', repoVerdict.ok, repoVerdict.detail);
+  if (!f.funded) {
+    const repoVerdict = repoMayHaveBounties({
+      fullName: f.repo.fullName,
+      enabled: f.repo.allowlisted && f.repo.enabled,
+      bountiesEnabled: f.repo.bountiesEnabled,
+      registeredProject: f.repo.registeredProject,
+    });
+    check('repo_may_have_bounties', repoVerdict.ok, repoVerdict.detail);
+  }
   check('bounty_open', f.bounty.status === 'posted' || f.bounty.status === 'in_review', `bounty status is ${f.bounty.status}`);
-  check('network_allowed', p.allowedNetworks.includes(f.bounty.network), `network ${f.bounty.network}; allowed: ${p.allowedNetworks.join(', ') || 'none'}`);
+  const networks = f.funded ? (p.fundedNetworks ?? []) : p.allowedNetworks;
+  check('network_allowed', networks.includes(f.bounty.network), `network ${f.bounty.network}; allowed: ${networks.join(', ') || 'none'}`);
 
   check('pr_merged', f.pr.merged === true, f.pr.merged ? `PR #${f.pr.number} is merged` : `PR #${f.pr.number} is not merged`);
   check('pr_closes_bounty_issue', f.pr.closesIssues.includes(f.bounty.issueNumber), `PR closes [${f.pr.closesIssues.join(', ')}]; bounty issue is #${f.bounty.issueNumber}`);

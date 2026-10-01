@@ -15,6 +15,7 @@ import { PgSpendLedger } from '../../../packages/db/src/pg.ts';
 import { applicantBucket, DRAW_SETTINGS, withDefaults } from '../../../packages/gate/src/draw-config.ts';
 import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
+import type { FundedService } from './funded-service.ts';
 
 export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
 
@@ -126,6 +127,19 @@ export interface PublicBounty {
    * unless the setting says otherwise.
    */
   applicantCount: number | null;
+  /**
+   * Present on a maintainer-funded bounty: who funded it, how it is assigned,
+   * the escrow anyone can read, and the funder's record. Everything a
+   * contributor needs to decide whether to apply, stated before they do.
+   */
+  funded: {
+    by: string;
+    mode: 'draw' | 'self_assign';
+    escrow: string;
+    escrowUrl: string;
+    deadlineAt: string;
+    profile: { bountiesFunded: number; unassignedBeforePr: number; disputesRaised: number } | null;
+  } | null;
 }
 
 export interface LedgerEvent {
@@ -161,7 +175,11 @@ export function poolVisibility(
 }
 
 export class PublicApi {
-  constructor(private readonly db: pg.Pool, private readonly cfg: AgentConfig) {}
+  constructor(
+    private readonly db: pg.Pool,
+    private readonly cfg: AgentConfig,
+    private readonly opts: { escrowMints?: Record<string, { mint: string; decimals: number }>; funded?: FundedService } = {},
+  ) {}
 
   status(): PublicStatus {
     const mainnetLive = this.cfg.network === 'solana-mainnet';
@@ -174,7 +192,7 @@ export class PublicApi {
   }
 
   private decimalsFor(mint: string) {
-    return Object.values(this.cfg.mints).find((m) => m.mint === mint)?.decimals ?? 6;
+    return [...Object.values(this.cfg.mints), ...Object.values(this.opts.escrowMints ?? {})].find((m) => m.mint === mint)?.decimals ?? 6;
   }
 
   /** Stored draw settings, defaults filled in. Read per call: a visibility
@@ -197,6 +215,7 @@ export class PublicApi {
               p.tx_signature, p.updated_at AS paid_at, s.author_login,
               b.is_test, b.waived_eligibility_rules, b.reserved_for_newcomers, b.applications_open_at, b.applications_close_at,
               a.github_login AS assigned_login, a.stale_at AS assignment_stale_at,
+              b.funded_by, e.assignment_mode, e.escrow_pubkey, e.deadline_at AS escrow_deadline_at,
               (SELECT count(*) FROM bounty_applications ap
                 WHERE ap.bounty_id = b.id AND ap.status IN ('applied','won','lost'))::int AS applicant_count
          FROM bounties b
@@ -204,6 +223,7 @@ export class PublicApi {
          LEFT JOIN payouts p ON p.bounty_id = b.id AND p.status = 'confirmed'
          LEFT JOIN submissions s ON s.id = p.submission_id
          LEFT JOIN bounty_assignments a ON a.bounty_id = b.id AND a.status IN ('active','pr_submitted')
+         LEFT JOIN bounty_escrows e ON e.bounty_id = b.id AND b.funded_by IS NOT NULL
         WHERE b.status IN ('posted','in_review','payable','paid') ${id ? 'AND b.id = $1' : ''}
         ORDER BY b.created_at DESC
         LIMIT 200`,
@@ -233,6 +253,13 @@ export class PublicApi {
       for (const list of history.values()) list.sort((a, b) => a.at.localeCompare(b.at));
     }
 
+    const profiles = new Map<string, { bountiesFunded: number; unassignedBeforePr: number; disputesRaised: number }>();
+    if (this.opts.funded) {
+      for (const login of new Set(r.rows.map((b) => b.funded_by as string | null).filter((x): x is string => Boolean(x)))) {
+        const p = await this.opts.funded.profile(login);
+        profiles.set(login.toLowerCase(), { bountiesFunded: p.bountiesFunded, unassignedBeforePr: p.unassignedBeforePr, disputesRaised: p.disputesRaised });
+      }
+    }
     return r.rows.map((b) => ({
       id: b.id,
       repo: `${b.owner}/${b.name}`,
@@ -258,6 +285,16 @@ export class PublicApi {
       assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
       history: history.get(b.id) ?? [],
       ...poolVisibility(Number(b.applicant_count ?? 0), visibility, b.applications_close_at),
+      funded: b.funded_by && b.escrow_pubkey
+        ? {
+            by: b.funded_by as string,
+            mode: b.assignment_mode as 'draw' | 'self_assign',
+            escrow: b.escrow_pubkey as string,
+            escrowUrl: explorerAccount(b.network, b.escrow_pubkey),
+            deadlineAt: new Date(b.escrow_deadline_at).toISOString(),
+            profile: profiles.get(String(b.funded_by).toLowerCase()) ?? null,
+          }
+        : null,
     }));
   }
 
@@ -386,4 +423,11 @@ export class PublicApi {
       events: events.slice(0, 300),
     };
   }
+}
+
+/** An account on the explorer for its network; the same explorer as transactions. */
+export function explorerAccount(network: string, address: string): string {
+  if (network === 'solana-mainnet') return `https://solscan.io/account/${address}`;
+  if (network === 'solana-devnet') return `https://solscan.io/account/${address}?cluster=devnet`;
+  return `(${network}) ${address}`;
 }
