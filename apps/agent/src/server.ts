@@ -260,8 +260,9 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
       // an admin action is Grainlify's judgement, made before it signs. This
       // service checks the first and trusts the second, and the admin domain
       // is what keeps a contributor's apply message from reaching either.
-      if (req.method === 'POST' && (url.pathname === '/bounties/apply' || url.pathname === '/bounties/mine' || url.pathname === '/admin/draw')) {
+      if (req.method === 'POST' && (url.pathname === '/bounties/apply' || url.pathname === '/bounties/mine' || url.pathname === '/admin/draw' || url.pathname === '/maintainer/draw')) {
         const isAdmin = url.pathname === '/admin/draw';
+        const isMaintainer = url.pathname === '/maintainer/draw';
         const isRead = url.pathname === '/bounties/mine';
         const cors = corsHeaders(req.headers.origin, d.publicOrigins ?? [], 'POST, OPTIONS');
         const reply = (status: number, body: unknown) => {
@@ -280,7 +281,7 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         const v = verifySessionAction(
           { message: body?.message, countersignature: body?.countersignature },
           d.linkCountersignKey,
-          isAdmin ? 'admin' : 'apply',
+          isAdmin ? 'admin' : isMaintainer ? 'maintainer' : 'apply',
           (d.now ?? (() => new Date()))(),
         );
         if (!v.ok) {
@@ -317,7 +318,7 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           return reply(200, { githubLogin: f.login, applications, assignments });
         }
 
-        if (!isAdmin) {
+        if (!isAdmin && !isMaintainer) {
           const r = await d.draw.apply({
             bountyId: f.subject,
             githubUserId: f.githubUserId,
@@ -333,8 +334,60 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             : reply(r.status, { error: r.error, detail: r.detail });
         }
 
-        // Admin actions. Each one names itself in the signed message, so a
-        // signature issued to read application counts cannot run a draw.
+        // Maintainer actions. Grainlify signs these for anybody signed in, so
+        // every per-bounty action is checked HERE against GitHub permission
+        // on that bounty's own repository, or against who funded it. Nothing
+        // on this channel touches platform settings.
+        if (isMaintainer) {
+          note = ` maintainer=${f.action} by=${f.login}`;
+          if (f.action === 'bounties') {
+            // Who maintains what is GitHub's answer, not ours.
+            return reply(200, { bounties: await d.draw.bountiesForMaintainer(f.login) });
+          }
+          const may = await d.draw.canManageBounty(f.subject, f.login);
+          if (!may.ok) {
+            note += ` refused=${may.error}`;
+            return reply(may.error === 'no_such_bounty' ? 404 : 403, {
+              error: may.error,
+              detail: may.error === 'no_such_bounty' ? 'that bounty does not exist' : 'you do not maintain this bounty\'s repository and did not fund it',
+            });
+          }
+          switch (f.action) {
+            case 'view': {
+              // What they may SEE is decided by the clock, and would be the
+              // same answer however the question were asked.
+              const v = await d.draw.maintainerView(f.subject);
+              return 'error' in v ? reply(404, v) : reply(200, v);
+            }
+            case 'unassign': {
+              const r = await d.draw.unassignByDecision({ bountyId: f.subject, actor: f.login, reason: String(body.reason ?? '') });
+              return r.ok ? reply(200, r) : reply(409, r);
+            }
+            case 'set_assignment_deadline': {
+              const r = await d.draw.setAssignmentDeadline({
+                bountyId: f.subject, newAt: new Date(String(body.deadline ?? '')), actor: f.login, reason: String(body.reason ?? ''),
+              });
+              return r.ok ? reply(200, r) : reply(409, r);
+            }
+            case 'run_draw': {
+              const staleHours = body.staleHours === undefined ? undefined : Number(body.staleHours);
+              if (staleHours !== undefined && (!Number.isFinite(staleHours) || staleHours <= 0)) {
+                return reply(400, { error: 'bad_deadline' });
+              }
+              const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true, staleHours });
+              return 'error' in r ? reply(409, r) : reply(200, r);
+            }
+            default:
+              return reply(400, { error: 'unknown_action', detail: `no maintainer action named ${f.action}` });
+          }
+        }
+
+        // Admin actions: platform-wide settings, the repository allowlist and
+        // escrow arbitration. Per-bounty controls are maintainers' and live
+        // on the channel above; they were removed from here so that "the
+        // admin keeps only platform settings and disputes" holds in the
+        // agent, not just in a screen. Each action names itself in the signed
+        // message, so a signature issued for one cannot run another.
         note = ` admin=${f.action} by=${f.login}`;
         switch (f.action) {
           case 'list_settings':
@@ -347,11 +400,6 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             const r = await d.draw.resetSetting(f.subject);
             return r.ok ? reply(200, { ok: true, settings: await d.draw.settings() }) : reply(400, { error: 'unknown_setting', detail: r.error });
           }
-          case 'bounty_state':
-            return reply(200, {
-              applications: await d.draw.applicationsFor(f.subject),
-              draws: await d.draw.drawsFor(f.subject),
-            });
           // --- funded bounties -------------------------------------------
           //
           // Every one of these refuses outright while funded_bounties_enabled
@@ -404,41 +452,6 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               changedBy: f.login,
             });
             return r.ok ? reply(200, { ...r, repos: await d.service.repoBountyStates() }) : reply(409, { error: r.error, detail: r.detail });
-          }
-          case 'maintainer_bounties':
-            // Who maintains what is GitHub's answer, not ours.
-            return reply(200, { bounties: await d.draw.bountiesForMaintainer(f.login) });
-          case 'maintainer_view': {
-            // Grainlify has already decided this caller maintains the repo.
-            // What they may SEE is decided here, by the clock, and would be
-            // the same answer however the question were asked.
-            const v = await d.draw.maintainerView(f.subject);
-            return 'error' in v ? reply(404, v) : reply(200, v);
-          }
-          case 'unassign': {
-            const r = await d.draw.unassignByDecision({
-              bountyId: f.subject,
-              actor: f.login,
-              reason: String(body.reason ?? ''),
-            });
-            return r.ok ? reply(200, r) : reply(409, r);
-          }
-          case 'set_assignment_deadline': {
-            const r = await d.draw.setAssignmentDeadline({
-              bountyId: f.subject,
-              newAt: new Date(String(body.deadline ?? '')),
-              actor: f.login,
-              reason: String(body.reason ?? ''),
-            });
-            return r.ok ? reply(200, r) : reply(409, r);
-          }
-          case 'run_draw': {
-            const staleHours = body.staleHours === undefined ? undefined : Number(body.staleHours);
-            if (staleHours !== undefined && (!Number.isFinite(staleHours) || staleHours <= 0)) {
-              return reply(400, { error: 'bad_deadline' });
-            }
-            const r = await d.draw.runDrawFor(f.subject, { triggeredBy: f.login, simulate: body.simulate === true, staleHours });
-            return 'error' in r ? reply(409, r) : reply(200, r);
           }
           default:
             return reply(400, { error: 'unknown_action', detail: `no admin action named ${f.action}` });

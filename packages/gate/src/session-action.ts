@@ -9,10 +9,18 @@
 // message naming the person and the action and signs it with the bounty link
 // key. This agent holds only the public half.
 //
-// Two domains, not one. An apply message signed for a contributor must never
+// Three domains, not one. An apply message signed for a contributor must never
 // be usable to change a draw weight, so the domain prefix - not a field inside
 // the message - is what separates them. A message signed under the apply
 // domain simply does not verify under the admin domain.
+//
+// The maintainer domain is the third. Grainlify signs it for anybody signed
+// in; whether they may act on a given bounty is decided here, from GitHub
+// permission on that bounty's repository. The admin domain, by contrast, is
+// only signed after Grainlify's own live admin check - so a maintainer
+// message must never verify as an admin one, which is what the separate
+// domain guarantees. Routes once relayed maintainer actions on the admin
+// domain, and any signed-in user could act on any bounty.
 //
 // The message shape is a contract with Grainlify-Backend's
 // handlers.BountyActionMessage: change both or neither.
@@ -21,6 +29,7 @@ import { createPublicKey, verify } from 'node:crypto';
 
 export const SESSION_APPLY_DOMAIN = 'grainlify-bounty-apply:v1\n';
 export const SESSION_ADMIN_DOMAIN = 'grainlify-bounty-admin:v1\n';
+export const SESSION_MAINTAINER_DOMAIN = 'grainlify-bounty-maintainer:v1\n';
 export const SESSION_ACTION_MAX_WINDOW_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 60_000;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -30,7 +39,7 @@ const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 // caller writes can add a line to the message.
 const MESSAGE = new RegExp(
   [
-    '^Grainlify: (apply for a bounty|admin action)',
+    '^Grainlify: (apply for a bounty|admin action|maintainer action)',
     'Action: ([a-z][a-z0-9_]{0,63})',
     'GitHub: ([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})) \\(id ([1-9][0-9]{0,15})\\)',
     // '/' is here so a subject can be a repository name (Owner/name). It
@@ -44,8 +53,21 @@ const MESSAGE = new RegExp(
   ].join('\\n'),
 );
 
+export type SessionActionKind = 'apply' | 'admin' | 'maintainer';
+
+const HEADLINE: Record<string, SessionActionKind> = {
+  'apply for a bounty': 'apply',
+  'admin action': 'admin',
+  'maintainer action': 'maintainer',
+};
+const DOMAIN: Record<SessionActionKind, string> = {
+  apply: SESSION_APPLY_DOMAIN,
+  admin: SESSION_ADMIN_DOMAIN,
+  maintainer: SESSION_MAINTAINER_DOMAIN,
+};
+
 export interface SessionActionFields {
-  kind: 'apply' | 'admin';
+  kind: SessionActionKind;
   action: string;
   login: string;
   githubUserId: number;
@@ -64,7 +86,7 @@ export function parseSessionActionMessage(message: string): SessionActionFields 
   const expiresAt = new Date(expires!);
   if (!Number.isSafeInteger(githubUserId) || Number.isNaN(issuedAt.getTime()) || Number.isNaN(expiresAt.getTime())) return null;
   return {
-    kind: headline === 'apply for a bounty' ? 'apply' : 'admin',
+    kind: HEADLINE[headline!]!,
     action: action!,
     login: login!,
     githubUserId,
@@ -79,14 +101,15 @@ export type SessionActionRefusal = 'malformed' | 'bad_countersignature' | 'not_y
 export type SessionActionResult = { ok: true; fields: SessionActionFields } | { ok: false; code: SessionActionRefusal; reason: string };
 
 /**
- * @param expect which domain the caller requires. An apply endpoint passes
- *   'apply' and an admin endpoint passes 'admin'; neither ever accepts both,
- *   which is what makes the separation real rather than advisory.
+ * @param expect which domain the caller requires: an apply endpoint passes
+ *   'apply', an admin endpoint 'admin', a maintainer endpoint 'maintainer'.
+ *   None ever accepts another, which is what makes the separation real
+ *   rather than advisory.
  */
 export function verifySessionAction(
   input: { message: unknown; countersignature: unknown },
   countersignPublicKeyB64: string,
-  expect: 'apply' | 'admin',
+  expect: SessionActionKind,
   now: Date,
 ): SessionActionResult {
   const { message, countersignature } = input;
@@ -99,9 +122,9 @@ export function verifySessionAction(
   // the wrong kind, rather than as a bad signature - they need different
   // answers, and conflating them has cost a round of diagnosis before.
   if (fields.kind !== expect) {
-    return { ok: false, code: 'wrong_domain', reason: `this is ${fields.kind === 'apply' ? 'an apply' : 'an admin'} message; this endpoint needs ${expect === 'apply' ? 'an apply' : 'an admin'} one` };
+    return { ok: false, code: 'wrong_domain', reason: `this is ${fields.kind === 'apply' ? 'an apply' : `a ${fields.kind}`} message; this endpoint needs ${expect === 'apply' ? 'an apply' : `a ${expect}`} one` };
   }
-  const domain = expect === 'apply' ? SESSION_APPLY_DOMAIN : SESSION_ADMIN_DOMAIN;
+  const domain = DOMAIN[expect];
   if (!verifyCountersignature(domain, message, countersignature, countersignPublicKeyB64)) {
     return { ok: false, code: 'bad_countersignature', reason: 'Grainlify did not sign this message for this purpose' };
   }

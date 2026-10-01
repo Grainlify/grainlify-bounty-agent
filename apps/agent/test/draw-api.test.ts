@@ -7,7 +7,7 @@ import type { AddressInfo } from 'node:net';
 import type pg from 'pg';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { freshDatabase } from '../../../packages/db/src/testing.ts';
-import { SESSION_ADMIN_DOMAIN, SESSION_APPLY_DOMAIN } from '../../../packages/gate/src/session-action.ts';
+import { SESSION_ADMIN_DOMAIN, SESSION_APPLY_DOMAIN, SESSION_MAINTAINER_DOMAIN } from '../../../packages/gate/src/session-action.ts';
 import { grainlifyKey } from '../../../packages/gate/test/session-support.ts';
 import { p2Config } from '../src/config.ts';
 import { DrawService } from '../src/draw-service.ts';
@@ -29,10 +29,10 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
   const now = () => new Date('2026-09-27T10:00:00Z');
   const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-  const message = (a: { kind: 'apply' | 'admin'; action: string; login: string; id: number; subject: string }) => {
+  const message = (a: { kind: 'apply' | 'admin' | 'maintainer'; action: string; login: string; id: number; subject: string }) => {
     const at = new Date(now().getTime() - 60_000);
     return [
-      `Grainlify: ${a.kind === 'apply' ? 'apply for a bounty' : 'admin action'}`,
+      `Grainlify: ${a.kind === 'apply' ? 'apply for a bounty' : `${a.kind} action`}`,
       `Action: ${a.action}`,
       `GitHub: ${a.login} (id ${a.id})`,
       `Subject: ${a.subject}`,
@@ -43,7 +43,7 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
   };
   const signedBody = (a: Parameters<typeof message>[0], extra: Record<string, unknown> = {}) => {
     const msg = message(a);
-    const domain = a.kind === 'apply' ? SESSION_APPLY_DOMAIN : SESSION_ADMIN_DOMAIN;
+    const domain = { apply: SESSION_APPLY_DOMAIN, admin: SESSION_ADMIN_DOMAIN, maintainer: SESSION_MAINTAINER_DOMAIN }[a.kind];
     return { message: msg, countersignature: sign(null, Buffer.from(domain + msg, 'utf8'), key.privateKey).toString('base64'), ...extra };
   };
   const post = async (path: string, body: unknown) => {
@@ -90,7 +90,7 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
   });
 
   const openWindow = async (b: string) =>
-    post('/admin/draw', signedBody({ kind: 'admin', action: 'bounty_state', login: 'admin', id: 1, subject: b }))
+    Promise.resolve()
       .then(() => db.query(`UPDATE bounties SET applications_open_at = $2, applications_close_at = $2::timestamptz + interval '6 hours' WHERE id = $1`, [b, now().toISOString()]));
 
   it('accepts an application carrying a countersigned message', async () => {
@@ -149,7 +149,8 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
       await person(id, login);
       await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login, id, subject: b }));
     }
-    const r = await post('/admin/draw', signedBody({ kind: 'admin', action: 'run_draw', login: 'Jagadeeshftw', id: 1, subject: b }));
+    gh.permissions.set('grainlify/test-repo:jagadeeshftw', 'admin');
+    const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'run_draw', login: 'Jagadeeshftw', id: 1, subject: b }));
     expect(r.status).toBe(200);
     expect(r.body).toMatchObject({ poolSize: 3, triggeredBy: 'Jagadeeshftw' });
     expect((r.body.pool as unknown[]).length).toBe(3);
@@ -161,19 +162,72 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
     await openWindow(b);
     await person(70, 'solo');
     await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'solo', id: 70, subject: b }));
-    const r = await post('/admin/draw', signedBody({ kind: 'admin', action: 'run_draw', login: 'admin', id: 1, subject: b }, { simulate: true }));
+    gh.permissions.set('grainlify/test-repo:maint', 'maintain');
+    const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'run_draw', login: 'maint', id: 3, subject: b }, { simulate: true }));
     expect(r.body).toMatchObject({ simulation: true, winner: null, assignmentId: null });
     expect((await db.query(`SELECT 1 FROM bounty_assignments WHERE bounty_id = $1`, [b])).rowCount).toBe(0);
   });
 
-  it('shows application counts and the draw history to an admin', async () => {
+  it('shows a maintainer the applications once the window has closed', async () => {
     const b = await newBounty();
     await openWindow(b);
     await person(80, 'seen');
     await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'seen', id: 80, subject: b }));
-    const r = await post('/admin/draw', signedBody({ kind: 'admin', action: 'bounty_state', login: 'admin', id: 1, subject: b }));
+    await db.query(`UPDATE bounties SET applications_close_at = $2 WHERE id = $1`, [b, new Date(now().getTime() - 1000).toISOString()]);
+    gh.permissions.set('grainlify/test-repo:maint', 'write');
+    const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'view', login: 'maint', id: 3, subject: b }));
     expect(r.status).toBe(200);
-    expect(r.body.applications).toMatchObject({ total: 1, eligible: 1, refused: 0 });
+    expect(r.body).toMatchObject({ applicantCount: 1, assignment: null, awaitingRedraw: false });
+  });
+
+  describe('who may act on a bounty', () => {
+    // These were relayed on the admin channel for anybody signed in, so any
+    // signed-in user could act on any bounty. They are now maintainer
+    // actions, checked here against the bounty's own repository.
+    it('refuses somebody who does not maintain the repository, and changes nothing', async () => {
+      const b = await newBounty();
+      await openWindow(b);
+      await person(90, 'applicant');
+      await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'applicant', id: 90, subject: b }));
+      for (const action of ['run_draw', 'unassign', 'set_assignment_deadline', 'view']) {
+        const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action, login: 'stranger', id: 91, subject: b }, { reason: 'x', deadline: '2030-01-01T00:00:00Z' }));
+        expect(r.status).toBe(403);
+        expect(r.body).toMatchObject({ error: 'not_your_bounty' });
+      }
+      expect((await db.query('SELECT 1 FROM bounty_draws WHERE bounty_id = $1', [b])).rowCount).toBe(0);
+    });
+
+    it('refuses read and triage permission: those are not maintaining it', async () => {
+      const b = await newBounty();
+      gh.permissions.set('grainlify/test-repo:triager', 'triage');
+      const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'view', login: 'triager', id: 92, subject: b }));
+      expect(r.status).toBe(403);
+    });
+
+    it('lets the person who funded the bounty act on it', async () => {
+      const b = await newBounty();
+      await db.query('UPDATE bounties SET funded_by = $2 WHERE id = $1', [b, 'Funder']);
+      const r = await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'view', login: 'funder', id: 93, subject: b }));
+      expect(r.status).toBe(200);
+    });
+
+    it('a maintainer message cannot run an admin action, and an admin message cannot run a maintainer one', async () => {
+      const b = await newBounty();
+      gh.permissions.set('grainlify/test-repo:maint', 'admin');
+      const asAdmin = await post('/admin/draw', signedBody({ kind: 'maintainer', action: 'list_settings', login: 'maint', id: 3, subject: '' }));
+      expect(asAdmin.body).toMatchObject({ error: 'wrong_domain' });
+      const asMaintainer = await post('/maintainer/draw', signedBody({ kind: 'admin', action: 'view', login: 'maint', id: 3, subject: b }));
+      expect(asMaintainer.body).toMatchObject({ error: 'wrong_domain' });
+    });
+
+    it('the admin channel no longer runs per-bounty actions', async () => {
+      const b = await newBounty();
+      for (const action of ['run_draw', 'unassign', 'set_assignment_deadline', 'bounty_state', 'maintainer_view']) {
+        const r = await post('/admin/draw', signedBody({ kind: 'admin', action, login: 'admin', id: 1, subject: b }, { reason: 'x' }));
+        expect(r.status).toBe(400);
+        expect(r.body).toMatchObject({ error: 'unknown_action' });
+      }
+    });
   });
 
   it('reads and writes settings, and refuses a value out of range', async () => {
@@ -255,7 +309,8 @@ describe.skipIf(!dbUrl)('the draw over HTTP', () => {
       await openWindow(b);
       await person(95, 'holder');
       await post('/bounties/apply', signedBody({ kind: 'apply', action: 'apply', login: 'holder', id: 95, subject: b }));
-      await post('/admin/draw', signedBody({ kind: 'admin', action: 'run_draw', login: 'admin', id: 1, subject: b }));
+      gh.permissions.set('grainlify/test-repo:maint', 'admin');
+      await post('/maintainer/draw', signedBody({ kind: 'maintainer', action: 'run_draw', login: 'maint', id: 3, subject: b }));
 
       const r = await post('/bounties/mine', signedBody({ kind: 'apply', action: 'my_state', login: 'holder', id: 95, subject: '' }));
       expect((r.body.assignments as Record<string, { status: string }>)[b]).toMatchObject({ status: 'active' });

@@ -417,8 +417,8 @@ export class DrawService {
    * bounty: the list is small and the answers are per repo.
    */
   async bountiesForMaintainer(login: string) {
-    const r = await this.d.db.query<{ id: string; owner: string; name: string; issue_number: number }>(
-      `SELECT b.id, r.owner, r.name, b.issue_number
+    const r = await this.d.db.query<{ id: string; owner: string; name: string; issue_number: number; funded_by: string | null }>(
+      `SELECT b.id, r.owner, r.name, b.issue_number, b.funded_by
          FROM bounties b JOIN repos r ON r.id = b.repo_id
         WHERE b.status IN ('posted','in_review','payable','paid')
         ORDER BY b.created_at DESC LIMIT 200`,
@@ -436,8 +436,35 @@ export class DrawService {
       }
     }
     return r.rows
-      .filter((x) => allowed.has(`${x.owner}/${x.name}`.toLowerCase()))
+      .filter((x) => allowed.has(`${x.owner}/${x.name}`.toLowerCase()) || (x.funded_by ?? '').toLowerCase() === login.toLowerCase())
       .map((x) => ({ bountyId: x.id, repo: `${x.owner}/${x.name}`, issueNumber: x.issue_number }));
+  }
+
+  /**
+   * May this GitHub user run the draw, unassign or move a deadline on this
+   * bounty? Write, maintain or admin on the bounty's own repository - the same
+   * permissions the payout gate accepts from a merger - or being the person
+   * who funded it.
+   *
+   * Decided per bounty, from the bounty's repository. Never from a repository
+   * the caller names: the old maintainer view checked ownership of whatever
+   * repo was in the query string and never that the bounty was in it.
+   */
+  async canManageBounty(bountyId: string, login: string): Promise<{ ok: true; repo: string } | { ok: false; error: 'no_such_bounty' | 'not_your_bounty' }> {
+    const b = (await this.d.db.query<{ owner: string; name: string; funded_by: string | null }>(
+      `SELECT r.owner, r.name, b.funded_by FROM bounties b JOIN repos r ON r.id = b.repo_id WHERE b.id = $1`,
+      [bountyId],
+    )).rows[0];
+    if (!b) return { ok: false, error: 'no_such_bounty' };
+    const repo = `${b.owner}/${b.name}`;
+    if (b.funded_by && b.funded_by.toLowerCase() === login.toLowerCase()) return { ok: true, repo };
+    try {
+      const perm = await this.d.gh.permission(repo, login);
+      if (['admin', 'maintain', 'write'].includes(perm)) return { ok: true, repo };
+    } catch {
+      // Not a collaborator: GitHub answers 404, which means no.
+    }
+    return { ok: false, error: 'not_your_bounty' };
   }
 
   /**
@@ -481,10 +508,34 @@ export class DrawService {
     );
     const total = Number(counted.rows[0]?.n ?? 0);
 
+    // What the controls need: who holds it, until when, whether a pull
+    // request is in, and whether it is waiting for somebody to redraw. The
+    // holder is public already (the public list shows assignedTo).
+    const state = (await this.d.db.query<{
+      status: string; awaiting_redraw: boolean; github_login: string | null; astatus: string | null;
+      stale_at: Date | null; qualifying_pr_number: number | null;
+    }>(
+      `SELECT b.status, b.awaiting_redraw, a.github_login, a.status AS astatus, a.stale_at, a.qualifying_pr_number
+         FROM bounties b
+         LEFT JOIN bounty_assignments a ON a.bounty_id = b.id AND a.status IN ('active','pr_submitted')
+        WHERE b.id = $1`,
+      [bountyId],
+    )).rows[0]!;
+
     const base = {
       bountyId,
       repo: `${row.owner}/${row.name}`,
       issueNumber: row.issue_number,
+      bountyStatus: state.status,
+      awaitingRedraw: state.awaiting_redraw,
+      assignment: state.github_login
+        ? {
+            githubLogin: state.github_login,
+            status: state.astatus,
+            staleAt: state.stale_at ? new Date(state.stale_at).toISOString() : null,
+            prNumber: state.qualifying_pr_number,
+          }
+        : null,
       windowOpen,
       applicationsCloseAt: closesAt ? closesAt.toISOString() : null,
       // Stated on every response, so the UI never has to infer it and a
