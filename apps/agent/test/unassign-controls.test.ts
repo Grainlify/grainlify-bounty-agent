@@ -271,6 +271,30 @@ describe.skipIf(!dbUrl)('unassigning as a decision', () => {
     });
   });
 
+  it('waits for somebody to press Redraw: the sweep does not redraw it', async () => {
+    // 30 September: three unassigns, and the sweep redrew all three within
+    // eight seconds, before anybody could press Redraw.
+    const { bountyId, winner } = await drawnBounty();
+    await applied(bountyId, 3, 'third-dev');
+    await svc.unassignByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Our decision.' });
+
+    const swept = await svc.closeDueWindows();
+    expect(swept.drawn).not.toContain(bountyId);
+    const live = await db.query("SELECT 1 FROM bounty_assignments WHERE bounty_id = $1 AND status = 'active'", [bountyId]);
+    expect(live.rowCount).toBe(0);
+
+    // A simulation decides nothing and changes nothing.
+    await svc.runDrawFor(bountyId, { triggeredBy: 'admin', simulate: true });
+    expect((await db.query<{ awaiting_redraw: boolean }>('SELECT awaiting_redraw FROM bounties WHERE id = $1', [bountyId])).rows[0]!.awaiting_redraw).toBe(true);
+
+    // The redraw somebody presses draws, honours the exclusion, and ends the wait.
+    const r = await svc.runDrawFor(bountyId, { triggeredBy: 'admin' });
+    expect('drawId' in r).toBe(true);
+    expect((await assignment(bountyId)).github_login).not.toBe(winner);
+    const b = await db.query<{ awaiting_redraw: boolean }>('SELECT awaiting_redraw FROM bounties WHERE id = $1', [bountyId]);
+    expect(b.rows[0]!.awaiting_redraw).toBe(false);
+  });
+
   it('keeps the person out of the next draw only, then lets them back in', async () => {
     const { bountyId, winner } = await drawnBounty();
     await svc.unassignByDecision({ bountyId, actor: 'admin', reason: 'faster turnaround' });

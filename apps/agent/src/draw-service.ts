@@ -675,6 +675,8 @@ export class DrawService {
       if (excluded) {
         await this.d.db.query('UPDATE bounties SET exclude_login_next_draw = NULL WHERE id = $1', [bountyId]);
       }
+      // The redraw somebody was waiting for has happened.
+      await this.d.db.query('UPDATE bounties SET awaiting_redraw = false WHERE id = $1 AND awaiting_redraw', [bountyId]);
       await this.d.db.query(
         `UPDATE bounty_applications SET status = CASE WHEN github_user_id = $2 THEN 'won' ELSE 'lost' END, updated_at = now()
           WHERE bounty_id = $1 AND status IN ('applied','lost')`,
@@ -824,8 +826,10 @@ export class DrawService {
         WHERE bounty_id = $1 AND github_login = $2 AND status = 'won'`,
       [input.bountyId, asg.github_login],
     );
+    // Waits for a person to press Redraw: without this the sweep redrew within
+    // seconds, before anybody could (0014_awaiting_redraw.sql).
     await this.d.db.query(
-      'UPDATE bounties SET exclude_login_next_draw = $2, updated_at = now() WHERE id = $1',
+      'UPDATE bounties SET exclude_login_next_draw = $2, awaiting_redraw = true, updated_at = now() WHERE id = $1',
       [input.bountyId, asg.github_login],
     );
     await this.d.db.query(
@@ -1185,6 +1189,8 @@ export class DrawService {
       `SELECT b.id, b.window_extensions
          FROM bounties b
         WHERE b.status = 'posted'
+          -- Unassigned by somebody, and waiting for them to redraw it.
+          AND NOT b.awaiting_redraw
           AND b.applications_close_at IS NOT NULL
           AND b.applications_close_at <= $1
           AND NOT EXISTS (SELECT 1 FROM bounty_assignments a WHERE a.bounty_id = b.id AND a.status IN ('active','pr_submitted'))`,
