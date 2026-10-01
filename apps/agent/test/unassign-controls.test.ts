@@ -193,6 +193,28 @@ describe.skipIf(!dbUrl)('unassigning as a decision', () => {
   });
 
   describe('closing a bounty by decision', () => {
+    it('can tell a holder released earlier that the round closed, once, and not a live holder', async () => {
+      const { bountyId } = await drawnBounty();
+      const live = (await assignment(bountyId)).id as string;
+      expect(await svc.tellRoundClosed({ assignmentId: live, actor: 'admin', reason: 'Closing.' }))
+        .toMatchObject({ ok: false, error: 'still_assigned' });
+
+      await svc.unassignByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Hackathon timeline.' });
+      const r = await svc.tellRoundClosed({ assignmentId: live, actor: 'Jagadeeshftw', reason: 'Closing this round.' });
+      expect(r).toMatchObject({ ok: true, queued: true });
+      // A second message after the "assignment ended" one, not swallowed by it...
+      const ev = await db.query("SELECT payload FROM bounty_events WHERE kind = 'bounty_unassigned' ORDER BY id");
+      expect(ev.rowCount).toBe(2);
+      expect(ev.rows[1]!.payload).toMatchObject({ reason: 'Closing this round.', closed: true });
+      // ...and only once.
+      expect(await svc.tellRoundClosed({ assignmentId: live, actor: 'Jagadeeshftw', reason: 'Closing this round.' }))
+        .toMatchObject({ ok: true, queued: false });
+      const audit = await db.query("SELECT 1 FROM audit_log WHERE action = 'assignment.round_closed_notice'");
+      expect(audit.rowCount).toBe(2);
+    });
+
+    // What unassigning alone could not do on 30 September: the bounty went
+    // back to the draw sweep and was redrawn within seconds.
     it('cancels the bounty so the sweep never draws it again', async () => {
       const { bountyId } = await drawnBounty();
       const r = await svc.closeByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Closing this round.' });

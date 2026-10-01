@@ -74,6 +74,9 @@ export const dedupe = {
   // Keyed to the assignment: one unassignment is one message, however many
   // times a retry re-enqueues it.
   unassigned: (assignmentId: string) => `unassigned:${assignmentId}`,
+  // A separate key: somebody already told their assignment ended can later be
+  // told the round closed, and the unassigned key would swallow that.
+  roundClosed: (assignmentId: string) => `round_closed:${assignmentId}`,
   // Keyed to the assignment AND the new deadline, so moving a deadline twice
   // tells the contributor twice, and moving it to the same value does not.
   deadlineChanged: (assignmentId: string, newAt: string) => `deadline_changed:${assignmentId}:${newAt}`,

@@ -940,6 +940,48 @@ export class DrawService {
   }
 
   /**
+   * Tell somebody whose assignment already ended that the round has closed.
+   *
+   * For holders released before a bounty was closed: they were told their
+   * assignment ended, with the reason given then, and nothing since. The
+   * message is the closed form of the unassigned notification - the reason
+   * alone, nothing about a pool or a next draw - so it reads the same as the
+   * one the last holders got. Audited; refuses a live assignment, which
+   * closeByDecision is for.
+   */
+  async tellRoundClosed(input: { assignmentId: string; actor: string; reason: string }) {
+    const reason = input.reason.trim();
+    if (!reason) return { ok: false as const, error: 'reason_required' };
+    const a = (await this.d.db.query<{
+      github_user_id: string; github_login: string; status: string; bounty_id: string;
+      repo: string; issue_number: number; amount_minor: string; currency: string;
+    }>(
+      `SELECT a.github_user_id, a.github_login, a.status, a.bounty_id,
+              r.owner||'/'||r.name AS repo, b.issue_number, b.amount_minor::text AS amount_minor, b.currency
+         FROM bounty_assignments a JOIN bounties b ON b.id = a.bounty_id JOIN repos r ON r.id = b.repo_id
+        WHERE a.id = $1`,
+      [input.assignmentId],
+    )).rows[0];
+    if (!a) return { ok: false as const, error: 'not_found' };
+    if (['active', 'pr_submitted'].includes(a.status)) return { ok: false as const, error: 'still_assigned' };
+
+    const queued = await enqueueEvent(this.d.db, {
+      kind: 'bounty_unassigned',
+      githubUserId: Number(a.github_user_id),
+      dedupeKey: dedupe.roundClosed(input.assignmentId),
+      payload: {
+        bountyId: a.bounty_id, repo: a.repo, issue_number: a.issue_number,
+        amount_minor: a.amount_minor, currency: a.currency, reason, actor: input.actor, closed: true,
+      },
+    });
+    await this.d.db.query(
+      `INSERT INTO audit_log (actor, action, subject, detail) VALUES ($1,'assignment.round_closed_notice',$2,$3)`,
+      [input.actor, a.bounty_id, JSON.stringify({ assignmentId: input.assignmentId, contributor: a.github_login, reason, queued })],
+    );
+    return { ok: true as const, contributor: a.github_login, queued };
+  }
+
+  /**
    * Move the deadline on a live assignment.
    *
    * Recorded in two places on purpose: the audit log, and a table the
