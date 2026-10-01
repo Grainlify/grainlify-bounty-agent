@@ -181,6 +181,10 @@ describe.skipIf(!dbUrl)('bounty loop end to end (mock inference, fake GitHub, fa
     await webhook('pull_request', { action: 'opened', repository: { full_name: REPO }, pull_request: { number: 101 } });
     expect(gh.reviews).toHaveLength(1);
     expect(gh.reviews[0]!.body).toMatch(/does not approve the PR or trigger payment/);
+    // ...and is recorded on the assignment, so neither the expiry warning nor
+    // the stale release can treat the person who answered as having gone quiet.
+    const held = (await db.query(`SELECT status, qualifying_pr_number FROM bounty_assignments WHERE bounty_id = $1`, [proposed.bountyId])).rows[0];
+    expect(held).toEqual({ status: 'pr_submitted', qualifying_pr_number: 101 });
 
     // 4. The maintainer merges; the gate passes; the payout waits for a human.
     merge(101);

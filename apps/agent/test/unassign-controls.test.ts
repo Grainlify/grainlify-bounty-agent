@@ -56,7 +56,7 @@ describe.skipIf(!dbUrl)('unassigning as a decision', () => {
   beforeEach(async () => {
     gh = new FakeGitHub();
     svc = new DrawService({ db, gh, now: () => now });
-    await db.query('TRUNCATE bounty_deadline_changes, bounty_events, bounty_assignments, bounty_draws, bounty_applications, bounties, wallet_links, contributors, repos, audit_log CASCADE');
+    await db.query('TRUNCATE submissions, bounty_deadline_changes, bounty_events, bounty_assignments, bounty_draws, bounty_applications, bounties, wallet_links, contributors, repos, audit_log CASCADE');
     const r = await db.query<{ id: number }>(
       `INSERT INTO repos (owner, name, installation_id, enabled) VALUES ('Grainlify','test-repo',1,true) RETURNING id`);
     repoId = r.rows[0]!.id;
@@ -123,9 +123,76 @@ describe.skipIf(!dbUrl)('unassigning as a decision', () => {
     expect((await assignment(bountyId)).status).toBe('pr_submitted');   // nothing moved
   });
 
+  describe('a pull request from the holder', () => {
+    // #35 on 30 September: PR #37 was open, the assignment still said active,
+    // and the sweep was on course to warn them and then release them with an
+    // abandon. Nobody who opened a PR may ever be counted as abandoning.
+    const submit = (bountyId: string, prNumber: number, githubUserId: number, login: string, state = 'open') =>
+      db.query(
+        `INSERT INTO submissions (id, bounty_id, pr_number, author_github_user_id, author_login, head_sha, state)
+         VALUES ($1,$2,$3,$4,$5,'sha',$6)`,
+        [randomUUID(), bountyId, prNumber, githubUserId, login, state]);
+    const holderId = async (bountyId: string) => Number((await assignment(bountyId)).github_user_id);
+
+    it('is recorded on the assignment by the sweep, with an audit entry', async () => {
+      const { bountyId, winner } = await drawnBounty();
+      await submit(bountyId, 37, await holderId(bountyId), winner);
+      const r = await svc.recordSubmittedPullRequests();
+      expect(r).toEqual([{ bountyId, githubLogin: winner, prNumber: 37 }]);
+      const a = await assignment(bountyId);
+      expect(a.status).toBe('pr_submitted');
+      expect(a.qualifying_pr_number).toBe(37);
+      const audit = await db.query("SELECT 1 FROM audit_log WHERE action = 'assignment.pr_recorded'");
+      expect(audit.rowCount).toBe(1);
+      expect(await svc.recordSubmittedPullRequests()).toEqual([]);   // idempotent
+    });
+
+    it('gets no expiry warning and is not released when the deadline passes', async () => {
+      const { bountyId, winner } = await drawnBounty();
+      await submit(bountyId, 37, await holderId(bountyId), winner);
+      await db.query(`UPDATE bounty_assignments SET stale_at = $2 WHERE bounty_id = $1`, [bountyId, new Date(now.getTime() + 3600_000).toISOString()]);
+      expect((await svc.releaseStaleAssignments()).warned).toEqual([]);
+
+      await db.query(`UPDATE bounty_assignments SET stale_at = $2 WHERE bounty_id = $1`, [bountyId, new Date(now.getTime() - 3600_000).toISOString()]);
+      expect((await svc.releaseStaleAssignments()).released).toEqual([]);
+      const a = await assignment(bountyId);
+      expect(a.status).toBe('pr_submitted');
+      expect(a.counts_as_abandon).toBe(false);
+    });
+
+    it('is protected even if the assignment was never marked, because the PR is open', async () => {
+      // The safety net under the record: the release itself checks for an
+      // open PR, so a missed webhook cannot cost anybody an abandon.
+      const { bountyId, winner } = await drawnBounty();
+      await db.query(`UPDATE bounty_assignments SET stale_at = $2 WHERE bounty_id = $1`, [bountyId, new Date(now.getTime() - 3600_000).toISOString()]);
+      await submit(bountyId, 37, await holderId(bountyId), winner);
+      const r = await svc.releaseStaleAssignments();
+      expect(r.released).toEqual([]);
+    });
+
+    it('never costs an abandon, even when the PR was closed unmerged and the deadline then passed', async () => {
+      const { bountyId, winner } = await drawnBounty();
+      await submit(bountyId, 37, await holderId(bountyId), winner, 'closed');
+      await db.query(`UPDATE bounty_assignments SET stale_at = $2 WHERE bounty_id = $1`, [bountyId, new Date(now.getTime() - 3600_000).toISOString()]);
+      const r = await svc.releaseStaleAssignments();
+      expect(r.released).toHaveLength(1);
+      const a = await assignment(bountyId);
+      expect(a.status).toBe('released_stale');
+      expect(a.counts_as_abandon).toBe(false);
+      expect(a.release_reason).toMatch(/closed unmerged/);
+    });
+
+    it('does not protect the holder with somebody else\'s PR', async () => {
+      const { bountyId } = await drawnBounty();
+      await person(99, 'someone-else');
+      await submit(bountyId, 38, 99, 'someone-else');
+      await db.query(`UPDATE bounty_assignments SET stale_at = $2 WHERE bounty_id = $1`, [bountyId, new Date(now.getTime() - 3600_000).toISOString()]);
+      expect((await svc.releaseStaleAssignments()).released).toHaveLength(1);
+      expect((await assignment(bountyId)).counts_as_abandon).toBe(true);   // went quiet: unchanged
+    });
+  });
+
   describe('closing a bounty by decision', () => {
-    // What unassigning alone could not do on 30 September: the bounty went
-    // back to the draw sweep and was redrawn within seconds.
     it('cancels the bounty so the sweep never draws it again', async () => {
       const { bountyId } = await drawnBounty();
       const r = await svc.closeByDecision({ bountyId, actor: 'Jagadeeshftw', reason: 'Closing this round.' });

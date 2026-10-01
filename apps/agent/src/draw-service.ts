@@ -995,7 +995,42 @@ export class DrawService {
     return { ok: true as const, assignmentId: asg.id, previousAt: previous.toISOString(), staleAt: input.newAt.toISOString() };
   }
 
+  /**
+   * Mark every live assignment whose holder has an open pull request on the
+   * bounty as having submitted one.
+   *
+   * The PR webhook does this as the PR arrives (service.onPullRequestActivity);
+   * this catches anything it missed. It once missed everything: the webhook
+   * moved the bounty to in_review and never touched the assignment, so the
+   * holder of #35, with PR #37 open, was on course for an expiry warning and
+   * then a stale release with an abandon. Keyed on GitHub user id, which
+   * survives a rename, and idempotent.
+   */
+  async recordSubmittedPullRequests(): Promise<{ bountyId: string; githubLogin: string; prNumber: number }[]> {
+    const r = await this.d.db.query<{ id: string; bounty_id: string; github_login: string; pr_number: number }>(
+      `UPDATE bounty_assignments a
+          SET status = 'pr_submitted', qualifying_pr_number = s.pr_number, updated_at = now()
+         FROM submissions s
+        WHERE a.status = 'active'
+          AND s.bounty_id = a.bounty_id
+          AND s.author_github_user_id = a.github_user_id
+          AND s.state = 'open'
+      RETURNING a.id, a.bounty_id, a.github_login, s.pr_number`,
+    );
+    for (const x of r.rows) {
+      await this.d.db.query(
+        `INSERT INTO audit_log (actor, action, subject, detail) VALUES ('agent','assignment.pr_recorded',$1,$2)`,
+        [x.bounty_id, JSON.stringify({ assignmentId: x.id, contributor: x.github_login, prNumber: x.pr_number, source: 'sweep' })],
+      );
+    }
+    return r.rows.map((x) => ({ bountyId: x.bounty_id, githubLogin: x.github_login, prNumber: x.pr_number }));
+  }
+
   async releaseStaleAssignments(): Promise<{ released: { bountyId: string; githubLogin: string }[]; warned: string[] }> {
+    // First, so nothing below can mistake somebody who answered for somebody
+    // who went quiet.
+    await this.recordSubmittedPullRequests();
+
     // The warning is computed HERE, from the same stale_at and the same clock
     // that decide the release. Put anywhere else, the two could disagree - and
     // a warning that says "24 hours left" about an assignment released an hour
@@ -1013,7 +1048,11 @@ export class DrawService {
          JOIN repos r ON r.id = b.repo_id
         WHERE a.status = 'active'
           AND a.stale_at > $1
-          AND a.stale_at <= $1::timestamptz + ($2 || ' hours')::interval`,
+          AND a.stale_at <= $1::timestamptz + ($2 || ' hours')::interval
+          -- Never "open a pull request" to somebody who has one open.
+          AND NOT EXISTS (SELECT 1 FROM submissions s
+                           WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id
+                             AND s.state = 'open')`,
       [this.d.now().toISOString(), String(warnHours)],
     );
     const warned: string[] = [];
@@ -1035,14 +1074,25 @@ export class DrawService {
     }
 
     const r = await this.d.db.query<{ bounty_id: string; github_login: string }>(
-      `UPDATE bounty_assignments
+      // Nobody who opened a pull request on the bounty is ever counted as
+      // having abandoned it: not while it is open (they are not released at
+      // all), and not if it was closed unmerged and the deadline then passed
+      // (released, but with no abandon, and the reason says so).
+      `UPDATE bounty_assignments a
           SET status = 'released_stale',
               released_at = $1,
-              release_reason = 'no pull request before the deadline',
-              counts_as_abandon = true,
+              release_reason = CASE WHEN EXISTS (SELECT 1 FROM submissions s
+                                                  WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id)
+                                    THEN 'deadline passed after their pull request was closed unmerged'
+                                    ELSE 'no pull request before the deadline' END,
+              counts_as_abandon = NOT EXISTS (SELECT 1 FROM submissions s
+                                               WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id),
               updated_at = now()
-        WHERE status = 'active' AND stale_at <= $1
-      RETURNING bounty_id, github_login`,
+        WHERE a.status = 'active' AND a.stale_at <= $1
+          AND NOT EXISTS (SELECT 1 FROM submissions s
+                           WHERE s.bounty_id = a.bounty_id AND s.author_github_user_id = a.github_user_id
+                             AND s.state = 'open')
+      RETURNING a.bounty_id, a.github_login`,
       [this.d.now().toISOString()],
     );
 

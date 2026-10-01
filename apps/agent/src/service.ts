@@ -480,6 +480,17 @@ export class BountyService {
     for (const b of bounties) {
       const submissionId = await this.upsertSubmission(String(b.id), pr, 'open');
       if (b.status === 'posted') await this.d.db.query(`UPDATE bounties SET status = 'in_review', updated_at = now() WHERE id = $1 AND status = 'posted'`, [b.id]);
+      // The holder's own PR is recorded on their assignment, so the expiry
+      // warning and the stale release leave them alone. Only the bounty moved
+      // before, and the holder of #35 was on course for an abandon with PR
+      // #37 open. The draw sweep also reconciles this, for anything missed.
+      const recorded = await this.d.db.query(
+        `UPDATE bounty_assignments SET status = 'pr_submitted', qualifying_pr_number = $3, updated_at = now()
+          WHERE bounty_id = $1 AND github_user_id = $2 AND status = 'active'
+        RETURNING id`,
+        [b.id, pr.authorId, pr.number],
+      );
+      if (recorded.rowCount) await this.audit('agent', 'assignment.pr_recorded', String(b.id), { assignmentId: recorded.rows[0].id, prNumber: pr.number, source: 'webhook' });
       const done = await this.d.db.query(`SELECT 1 FROM reviews WHERE submission_id = $1 AND head_sha = $2`, [submissionId, pr.headSha]);
       if (done.rowCount) continue; // one review per commit
       await this.reviewSubmission(fullName, b, submissionId, pr);
@@ -548,7 +559,17 @@ export class BountyService {
     const results: { bountyId: string; payoutId: string; gate: GateResult }[] = [];
     for (const b of bounties) {
       const submissionId = await this.upsertSubmission(String(b.id), pr, pr.merged ? 'merged' : 'closed');
-      if (!pr.merged) continue;
+      if (!pr.merged) {
+        // Closed unmerged: the holder can still submit another, so they are
+        // live again. Having submitted once, they can never be counted as
+        // abandoning it - the stale release checks for exactly that.
+        await this.d.db.query(
+          `UPDATE bounty_assignments SET status = 'active', updated_at = now()
+            WHERE bounty_id = $1 AND status = 'pr_submitted' AND qualifying_pr_number = $2`,
+          [b.id, pr.number],
+        );
+        continue;
+      }
       const gate = await this.runGate(fullName, repo!, b, pr);
       const payoutId = randomUUID();
       const wallet = gate.facts.wallet?.address ?? '';
