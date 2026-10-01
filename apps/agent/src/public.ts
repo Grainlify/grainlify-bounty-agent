@@ -71,6 +71,10 @@ export interface PublicStatus {
   statusLine: string;
 }
 
+export type BountyHistoryEntry =
+  | { kind: 'draw'; at: string; by: string; drawn: string | null }
+  | { kind: 'unassign'; at: string; by: string; contributor: string };
+
 export interface PublicBounty {
   id: string;
   repo: string;
@@ -99,6 +103,15 @@ export interface PublicBounty {
    *  people applied would make the draw something to time. */
   assignedTo: string | null;
   assignmentStaleAt: string | null;
+  /**
+   * Every real draw and every unassign on this bounty, oldest first. Public so
+   * that a maintainer who keeps unassigning and redrawing until somebody they
+   * prefer wins does it in plain sight. Who acted, when, and who was drawn or
+   * unassigned - names already public as assignedTo. Not the reason given for
+   * an unassign: that is written to the contributor, not to the world.
+   * Simulations are not here: they decide nothing.
+   */
+  history: BountyHistoryEntry[];
   /**
    * How many people are in the pool, as a coarse band while the window is
    * open: 'none' | 'few' | 'many', or null when the event hides it.
@@ -196,6 +209,30 @@ export class PublicApi {
         LIMIT 200`,
       id ? [id] : [],
     );
+    // One query each for the whole list, not one per bounty.
+    const ids = r.rows.map((b) => b.id as string);
+    const history = new Map<string, BountyHistoryEntry[]>();
+    if (ids.length) {
+      const draws = await this.db.query<{ bounty_id: string; created_at: Date; triggered_by: string | null; winner_login: string | null }>(
+        `SELECT bounty_id, created_at, triggered_by, winner_login FROM bounty_draws
+          WHERE bounty_id = ANY($1::uuid[]) AND NOT is_simulation`,
+        [ids],
+      );
+      const unassigns = await this.db.query<{ bounty_id: string; released_at: Date; released_by: string; github_login: string }>(
+        `SELECT bounty_id, released_at, released_by, github_login FROM bounty_assignments
+          WHERE bounty_id = ANY($1::uuid[]) AND status = 'released_voluntary' AND released_by IS NOT NULL`,
+        [ids],
+      );
+      const add = (id: string, e: BountyHistoryEntry) => history.set(id, [...(history.get(id) ?? []), e]);
+      for (const d of draws.rows) {
+        add(d.bounty_id, { kind: 'draw', at: new Date(d.created_at).toISOString(), by: d.triggered_by ?? 'automatic', drawn: d.winner_login });
+      }
+      for (const u of unassigns.rows) {
+        add(u.bounty_id, { kind: 'unassign', at: new Date(u.released_at).toISOString(), by: u.released_by, contributor: u.github_login });
+      }
+      for (const list of history.values()) list.sort((a, b) => a.at.localeCompare(b.at));
+    }
+
     return r.rows.map((b) => ({
       id: b.id,
       repo: `${b.owner}/${b.name}`,
@@ -219,6 +256,7 @@ export class PublicApi {
       applicationState: !b.applications_close_at ? 'none' : new Date(b.applications_close_at) > new Date() ? 'open' : 'closed',
       assignedTo: b.assigned_login ?? null,
       assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
+      history: history.get(b.id) ?? [],
       ...poolVisibility(Number(b.applicant_count ?? 0), visibility, b.applications_close_at),
     }));
   }

@@ -69,6 +69,31 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
     expect((await api.bounties(id))[0]).toMatchObject({ assignedTo: null });
   });
 
+  it('publishes every real draw and every unassign, in order, without the reason', async () => {
+    // Steering in plain sight: a maintainer who keeps unassigning and
+    // redrawing until somebody they prefer wins does it on the public record.
+    const id = await bounty({ closeAt: new Date(Date.now() - 1000).toISOString() });
+    const at = (m: number) => new Date(Date.UTC(2026, 9, 1, 10, m)).toISOString();
+    await db.query(`INSERT INTO bounty_draws (bounty_id, seed, winner_login, triggered_by, created_at) VALUES ($1, 1, 'first', 'automatic', $2)`, [id, at(0)]);
+    await db.query(
+      `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at, released_at, released_by, release_reason)
+       VALUES ($1, 42, 'first', 'released_voluntary', $2, $2, 'maint', 'a private reason for the contributor')`, [id, at(5)]);
+    await db.query(`INSERT INTO bounty_draws (bounty_id, seed, winner_login, triggered_by, is_simulation, created_at) VALUES ($1, 2, 'nobody', 'maint', true, $2)`, [id, at(7)]);
+    await db.query(`INSERT INTO bounty_draws (bounty_id, seed, winner_login, triggered_by, created_at) VALUES ($1, 3, 'second', 'maint', $2)`, [id, at(9)]);
+    // A deadline release is not somebody's decision, and is not listed as one.
+    await db.query(
+      `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at, released_at, counts_as_abandon)
+       VALUES ($1, 43, 'quiet', 'released_stale', $2, $2, true)`, [id, at(11)]);
+
+    const h = (await api.bounties(id))[0]!.history;
+    expect(h).toEqual([
+      { kind: 'draw', at: at(0), by: 'automatic', drawn: 'first' },
+      { kind: 'unassign', at: at(5), by: 'maint', contributor: 'first' },
+      { kind: 'draw', at: at(9), by: 'maint', drawn: 'second' },
+    ]);
+    expect(JSON.stringify(h)).not.toContain('private reason');
+  });
+
   it('never publishes who applied, only how many, and coarsely', async () => {
     // A precise live count makes the draw something to time: apply late, when
     // the odds look best. Names are never published at all.
