@@ -8,6 +8,7 @@ import type { Approval } from '../../../packages/gate/src/approval.ts';
 import type { BountyService } from './service.ts';
 import type { DrawService } from './draw-service.ts';
 import type { EscrowService } from './escrow-service.ts';
+import type { FundedService } from './funded-service.ts';
 import { corsHeaders, type PublicApi } from './public.ts';
 import { verifySessionAction } from '../../../packages/gate/src/session-action.ts';
 
@@ -42,6 +43,8 @@ export interface ServerDeps {
    * operator needs to tell them apart.
    */
   escrow?: EscrowService;
+  /** Funded bounties' lifecycle: funding, assigning, unassigning, disputes. Present whenever `escrow` is. */
+  funded?: FundedService;
   /**
    * Applications, the draw and the admin controls. Absent in the tests that
    * only exercise the webhook and the link routes, so those routes answer 503
@@ -140,6 +143,11 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         if (url.pathname === '/public/rules') return pub(200, await d.publicApi.rules());
         if (url.pathname === '/public/ledger') return pub(200, await d.publicApi.ledger());
         if (url.pathname === '/public/bounties') return pub(200, { status: d.publicApi.status(), bounties: await d.publicApi.bounties() });
+        const funder = /^\/public\/funders\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,38}))$/.exec(url.pathname);
+        if (funder) {
+          if (!d.funded) return pub(404, { error: 'not found' });
+          return pub(200, { profile: await d.funded.profile(funder[1]!) });
+        }
         const b = /^\/public\/bounties\/([0-9a-f-]{36})$/.exec(url.pathname);
         if (b) {
           const [one] = await d.publicApi.bounties(b[1]);
@@ -318,6 +326,23 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           return reply(200, { githubLogin: f.login, applications, assignments });
         }
 
+        // The contributor's side of unassigning once a pull request is open.
+        // Same channel as applying: it is the contributor acting on their own
+        // assignment, and the funded service checks it is theirs by GitHub id.
+        if (!isAdmin && !isMaintainer && f.action.startsWith('unassign_')) {
+          if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+          note = ` contributor=${f.action} github=${f.githubUserId}`;
+          const text = typeof body.text === 'string' ? body.text : '';
+          const r = f.action === 'unassign_propose'
+            ? await d.funded.propose(f.subject, f.login, f.githubUserId, text)
+            : f.action === 'unassign_accept' || f.action === 'unassign_refuse'
+              ? await d.funded.respond(f.subject, f.login, f.githubUserId, f.action === 'unassign_accept', text)
+              : f.action === 'unassign_withdraw'
+                ? await d.funded.withdraw(f.subject, f.login)
+                : { ok: false as const, status: 400, error: 'unknown_action', detail: `no contributor action named ${f.action}` };
+          return r.ok ? reply(200, r) : reply(r.status, { error: r.error, detail: r.detail });
+        }
+
         if (!isAdmin && !isMaintainer) {
           const r = await d.draw.apply({
             bountyId: f.subject,
@@ -372,6 +397,74 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               });
             }
           }
+          // --- funded bounties: the funder runs their own --------------
+          //
+          // Each is checked inside the funded service: the switch (or a
+          // tester), and that the caller FUNDED this bounty - a repository
+          // maintainer who did not fund it does not run it.
+          if (f.action.startsWith('funded_')) {
+            if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+            const fd = d.funded;
+            const text = typeof body.reason === 'string' ? body.reason : '';
+            const sig = String(body.signature ?? '');
+            const out = await (async () => {
+              switch (f.action) {
+                case 'funded_prepare': {
+                  // Subject is owner/name:issue. Whether it is a verified
+                  // Grainlify project is the backend's answer, which it gives
+                  // before signing; verifiedProject repeats it.
+                  const m = /^([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+):([1-9][0-9]{0,9})$/.exec(f.subject);
+                  if (!m) return { ok: false as const, status: 400, error: 'bad_subject', detail: 'expected owner/name:issue' };
+                  let amount: bigint;
+                  try { amount = BigInt(String(body.amountMinor ?? '')); } catch { return { ok: false as const, status: 400, error: 'bad_amount', detail: 'amountMinor must be an integer' }; }
+                  const mode = body.mode === 'self_assign' ? 'self_assign' as const : body.mode === 'draw' ? 'draw' as const : null;
+                  if (!mode) return { ok: false as const, status: 400, error: 'bad_mode', detail: 'mode is draw or self_assign' };
+                  return fd.prepare({
+                    login: f.login, githubUserId: f.githubUserId, repo: m[1]!, issueNumber: Number(m[2]), amountMinor: amount,
+                    currency: String(body.currency ?? ''), mode, deadline: new Date(String(body.deadline ?? '')),
+                    funderWallet: String(body.funderWallet ?? ''), verifiedProject: body.verifiedProject === true,
+                  });
+                }
+                case 'funded_confirm':
+                  if (!sig) return { ok: false as const, status: 400, error: 'signature_required', detail: 'the funding transaction signature is required' };
+                  return fd.confirm(f.subject, f.login, sig);
+                case 'funded_view':
+                  return fd.view(f.subject, f.login);
+                case 'funded_assign_prepare':
+                  return fd.assignPrepare(f.subject, f.login, String(body.applicant ?? ''));
+                case 'funded_assign_confirm':
+                  return fd.assignConfirm(f.subject, f.login, String(body.applicant ?? ''), sig);
+                case 'funded_draw':
+                  return fd.runDraw(f.subject, f.login, body.simulate === true);
+                case 'funded_unassign':
+                  return fd.unassign(f.subject, f.login, text);
+                case 'funded_unassign_confirm':
+                  return fd.unassignConfirm(f.subject, f.login, text, sig);
+                case 'funded_propose':
+                  return fd.propose(f.subject, f.login, f.githubUserId, text);
+                case 'funded_accept':
+                case 'funded_refuse':
+                  return fd.respond(f.subject, f.login, f.githubUserId, f.action === 'funded_accept', text);
+                case 'funded_withdraw':
+                  return fd.withdraw(f.subject, f.login);
+                default:
+                  return { ok: false as const, status: 400, error: 'unknown_action', detail: `no maintainer action named ${f.action}` };
+              }
+            })();
+            if (!out.ok) note += ` refused=${out.error}`;
+            return out.ok ? reply(200, out) : reply(out.status, { error: out.error, detail: out.detail });
+          }
+
+          // Named before anything is looked up: an action this channel does
+          // not have, or a subject that is not a bounty id, is a bad request,
+          // not a database error.
+          const PER_BOUNTY = ['view', 'unassign', 'set_assignment_deadline', 'run_draw', 'escrow_state', 'escrow_confirm'];
+          if (!PER_BOUNTY.includes(f.action)) {
+            return reply(400, { error: 'unknown_action', detail: `no maintainer action named ${f.action}` });
+          }
+          if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(f.subject)) {
+            return reply(400, { error: 'bad_subject', detail: 'the subject must be a bounty id' });
+          }
           const may = await d.draw.canManageBounty(f.subject, f.login);
           if (!may.ok) {
             note += ` refused=${may.error}`;
@@ -379,6 +472,13 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               error: may.error,
               detail: may.error === 'no_such_bounty' ? 'that bounty does not exist' : 'you do not maintain this bounty\'s repository and did not fund it',
             });
+          }
+          // The agent's own draw controls do not run a funded bounty: they know
+          // nothing of the escrow, and would leave the chain and this table
+          // disagreeing about who holds it.
+          if (['unassign', 'set_assignment_deadline', 'run_draw'].includes(f.action)) {
+            const funded = await d.db.query('SELECT 1 FROM bounties WHERE id = $1 AND funded_by IS NOT NULL', [f.subject]);
+            if (funded.rowCount) return reply(409, { error: 'funded_bounty', detail: 'this bounty is funded; its funder runs it from the funded controls' });
           }
           switch (f.action) {
             case 'view': {
@@ -411,6 +511,10 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
               const sig = String(body.signature ?? '');
               if (!sig) return reply(400, { error: 'signature_required' });
+              if (d.funded) {
+                const r = await d.funded.confirm(f.subject, f.login, sig);
+                return r.ok ? reply(200, r) : reply(r.status, { error: r.error, detail: r.detail });
+              }
               const r = await d.escrow.confirmFunding(f.subject, sig);
               return r.ok ? reply(200, r) : reply(409, r);
             }
@@ -460,6 +564,29 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           case 'escrow_list': {
             if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
             return reply(200, { escrows: await d.escrow.all() });
+          }
+          // Disputes: refused proposals to unassign once a pull request was
+          // open. The admin can leave it to the deadline or record a conduct
+          // note. There is no action that ends a dispute in the funder's
+          // favour early, because nothing could: refund is the funder's,
+          // after the deadline, and the program has no other way back.
+          case 'dispute_list':
+            if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+            return reply(200, { disputes: await d.funded.disputes() });
+          case 'dispute_view': {
+            if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+            const r = await d.funded.dispute(f.subject);
+            return r.ok ? reply(200, r) : reply(r.status, { error: r.error, detail: r.detail });
+          }
+          case 'dispute_leave': {
+            if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+            const r = await d.funded.leaveToDeadline(f.subject, f.login);
+            return r.ok ? reply(200, r) : reply(r.status, { error: r.error, detail: r.detail });
+          }
+          case 'dispute_note': {
+            if (!d.funded) return reply(503, { error: 'escrow_not_configured' });
+            const r = await d.funded.conductNote(f.subject, f.login, String(body.note ?? ''));
+            return r.ok ? reply(200, r) : reply(r.status, { error: r.error, detail: r.detail });
           }
           case 'list_repos':
             return reply(200, { repos: await d.service.repoBountyStates() });
