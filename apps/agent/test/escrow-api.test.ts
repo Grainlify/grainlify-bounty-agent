@@ -1,4 +1,5 @@
-// The funded-bounty routes on the signed admin channel, against Postgres.
+// The funded-bounty routes on the signed channels, against Postgres: the
+// funder's actions on the maintainer channel, arbitration on the admin one.
 // Needs TEST_DATABASE_URL.
 //
 // The point of most of these is the switch. A feature that is off should be
@@ -11,7 +12,7 @@ import type pg from 'pg';
 import { Connection, Keypair } from '@solana/web3.js';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { freshDatabase } from '../../../packages/db/src/testing.ts';
-import { SESSION_ADMIN_DOMAIN } from '../../../packages/gate/src/session-action.ts';
+import { SESSION_ADMIN_DOMAIN, SESSION_MAINTAINER_DOMAIN } from '../../../packages/gate/src/session-action.ts';
 import { grainlifyKey } from '../../../packages/gate/test/session-support.ts';
 import { p2Config } from '../src/config.ts';
 import { createAgentServer } from '../src/server.ts';
@@ -31,19 +32,25 @@ describe.skipIf(!dbUrl)('the funded-bounty routes', () => {
   const now = () => new Date('2026-09-30T10:00:00Z');
   const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
-  const signedBody = (action: string, subject: string, extra: Record<string, unknown> = {}) => {
+  // The funder's actions travel on the maintainer channel; only the escrow
+  // list and arbitration read are admin.
+  const kindOf = (action: string) => (['escrow_list'].includes(action) ? 'admin' : 'maintainer');
+  const signedBody = (action: string, subject: string, extra: Record<string, unknown> = {}, kind: 'admin' | 'maintainer' = kindOf(action), login = 'admin') => {
     const at = new Date(now().getTime() - 60_000);
     const msg = [
-      'Grainlify: admin action',
+      `Grainlify: ${kind} action`,
       `Action: ${action}`,
-      'GitHub: admin (id 1)',
+      `GitHub: ${login} (id 1)`,
       `Subject: ${subject}`,
       `Nonce: ${randomBytes(16).toString('hex')}`,
       `Issued: ${iso(at)}`,
       `Expires: ${iso(new Date(at.getTime() + 600_000))}`,
     ].join('\n');
-    return { message: msg, countersignature: sign(null, Buffer.from(SESSION_ADMIN_DOMAIN + msg, 'utf8'), key.privateKey).toString('base64'), ...extra };
+    const domain = kind === 'admin' ? SESSION_ADMIN_DOMAIN : SESSION_MAINTAINER_DOMAIN;
+    return { message: msg, countersignature: sign(null, Buffer.from(domain + msg, 'utf8'), key.privateKey).toString('base64'), ...extra };
   };
+  const channel = (body: { message: string }) => (body.message.startsWith('Grainlify: admin') ? '/admin/draw' : '/maintainer/draw');
+  const send = (body: { message: string }) => post(channel(body), body);
   const post = async (path: string, body: unknown) => {
     const r = await fetch(`${url}${path}`, { method: 'POST', headers: { 'content-type': 'application/json', origin: ORIGIN }, body: JSON.stringify(body) });
     return { status: r.status, body: (await r.json()) as Record<string, unknown> };
@@ -85,21 +92,21 @@ describe.skipIf(!dbUrl)('the funded-bounty routes', () => {
 
   it('refuses a quote while the switch is off', async () => {
     await setSwitch(false);
-    const r = await post('/admin/draw', signedBody('escrow_quote', '', { amountMinor: '50000000' }));
+    const r = await send(signedBody('escrow_quote', '', { amountMinor: '50000000' }));
     expect(r.status).toBe(403);
     expect(r.body.error).toBe('funded_bounties_disabled');
   });
 
   it('refuses to confirm a funding while the switch is off', async () => {
     await setSwitch(false);
-    const r = await post('/admin/draw', signedBody('escrow_confirm', randomUUID(), { signature: 'abc' }));
+    const r = await send(signedBody('escrow_confirm', randomUUID(), { signature: 'abc' }));
     expect(r.status).toBe(403);
     expect(r.body.error).toBe('funded_bounties_disabled');
   });
 
   it('quotes the fee on top, with the floor, once the switch is on', async () => {
     await setSwitch(true);
-    const r = await post('/admin/draw', signedBody('escrow_quote', '', { amountMinor: '50000000' }));
+    const r = await send(signedBody('escrow_quote', '', { amountMinor: '50000000' }));
     expect(r.status).toBe(200);
     expect(r.body.amountMinor).toBe('50000000');
     expect(r.body.feeAmountMinor).toBe('1250000');     // 2.5% of 50
@@ -109,7 +116,7 @@ describe.skipIf(!dbUrl)('the funded-bounty routes', () => {
 
   it('quotes the floor on a small bounty, and says the rate it works out at', async () => {
     await setSwitch(true);
-    const r = await post('/admin/draw', signedBody('escrow_quote', '', { amountMinor: '1000000' }));
+    const r = await send(signedBody('escrow_quote', '', { amountMinor: '1000000' }));
     expect(r.body.feeAmountMinor).toBe('250000');      // 25c, not 2.5c
     expect(r.body.flooredByMinimum).toBe(true);
     expect(r.body.effectiveRate).toBeCloseTo(0.25, 6);
@@ -117,22 +124,37 @@ describe.skipIf(!dbUrl)('the funded-bounty routes', () => {
 
   it('refuses a zero or unreadable amount rather than quoting one', async () => {
     await setSwitch(true);
-    expect((await post('/admin/draw', signedBody('escrow_quote', '', { amountMinor: '0' }))).status).toBe(400);
-    expect((await post('/admin/draw', signedBody('escrow_quote', '', { amountMinor: 'lots' }))).status).toBe(400);
+    expect((await send(signedBody('escrow_quote', '', { amountMinor: '0' }))).status).toBe(400);
+    expect((await send(signedBody('escrow_quote', '', { amountMinor: 'lots' }))).status).toBe(400);
   });
 
   it('answers 404 for a bounty with no escrow rather than inventing one', async () => {
     await setSwitch(true);
-    const r = await post('/admin/draw', signedBody('escrow_state', randomUUID()));
+    const r = await send(signedBody('escrow_state', randomUUID(), {}, 'admin'));
     expect(r.status).toBe(404);
     expect(r.body.error).toBe('no_escrow');
   });
 
   it('lists nothing before anything is funded', async () => {
     await setSwitch(true);
-    const r = await post('/admin/draw', signedBody('escrow_list', ''));
+    const r = await send(signedBody('escrow_list', ''));
     expect(r.status).toBe(200);
     expect(r.body.escrows).toEqual([]);
+  });
+
+  it('will not show a bounty\'s escrow to somebody who neither maintains nor funded it', async () => {
+    // On the admin channel this answered for any escrow to anybody signed in.
+    await setSwitch(true);
+    const repo = await db.query<{ id: number }>(
+      `INSERT INTO repos (owner, name, enabled) VALUES ('Grainlify','escrow-repo',true) ON CONFLICT DO NOTHING RETURNING id`);
+    const repoId = repo.rows[0]?.id ?? (await db.query<{ id: number }>(`SELECT id FROM repos WHERE name = 'escrow-repo'`)).rows[0]!.id;
+    const b = randomUUID();
+    await db.query(
+      `INSERT INTO bounties (id, repo_id, issue_number, amount_minor, currency, mint, network, status, created_by)
+       VALUES ($1,$2,1,1000000,'USDC','mint','solana-devnet','posted','test')`, [b, repoId]);
+    const r = await send(signedBody('escrow_state', b, {}, 'maintainer', 'stranger'));
+    expect(r.status).toBe(403);
+    expect(r.body.error).toBe('not_your_bounty');
   });
 
   // An unsigned request must not reach these any more than it reaches the draw.

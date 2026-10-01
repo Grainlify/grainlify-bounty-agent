@@ -344,6 +344,34 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
             // Who maintains what is GitHub's answer, not ours.
             return reply(200, { bounties: await d.draw.bountiesForMaintainer(f.login) });
           }
+          // Funded bounties are unreachable while switched off - refused for
+          // being off before anything else is looked at, so a disabled feature
+          // never answers a question about whether a bounty exists.
+          if (f.action.startsWith('escrow_')) {
+            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+          }
+          // A quote is arithmetic on an amount, about no bounty in particular.
+          switch (f.action) {
+            case 'escrow_quote': {
+              if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+              if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+              let amount: bigint;
+              try { amount = BigInt(String(body.amountMinor ?? '')); }
+              catch { return reply(400, { error: 'bad_amount' }); }
+              if (amount <= 0n) return reply(400, { error: 'bad_amount' });
+              const q = await d.escrow.quoteFor(amount);
+              return reply(200, {
+                amountMinor: q.amountMinor.toString(),
+                feeBps: q.feeBps,
+                feeMinimumMinor: q.feeMinimumMinor.toString(),
+                feeAmountMinor: q.feeAmountMinor.toString(),
+                totalMinor: q.totalMinor.toString(),
+                effectiveRate: q.effectiveRate,
+                flooredByMinimum: q.flooredByMinimum,
+              });
+            }
+          }
           const may = await d.draw.canManageBounty(f.subject, f.login);
           if (!may.ok) {
             note += ` refused=${may.error}`;
@@ -367,6 +395,23 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
               const r = await d.draw.setAssignmentDeadline({
                 bountyId: f.subject, newAt: new Date(String(body.deadline ?? '')), actor: f.login, reason: String(body.reason ?? ''),
               });
+              return r.ok ? reply(200, r) : reply(409, r);
+            }
+            // --- funded bounties: the funder's own escrow ---------------
+            // Every one refuses while funded_bounties_enabled is off; state
+            // is now checked per bounty too, where on the admin channel it
+            // answered for any escrow to anybody signed in.
+            case 'escrow_state': {
+              if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+              const e = await d.escrow.detail(f.subject);
+              return e ? reply(200, { escrow: e }) : reply(404, { error: 'no_escrow' });
+            }
+            case 'escrow_confirm': {
+              if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
+              if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
+              const sig = String(body.signature ?? '');
+              if (!sig) return reply(400, { error: 'signature_required' });
+              const r = await d.escrow.confirmFunding(f.subject, sig);
               return r.ok ? reply(200, r) : reply(409, r);
             }
             case 'run_draw': {
@@ -405,25 +450,9 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           // Every one of these refuses outright while funded_bounties_enabled
           // is off, rather than rendering a disabled screen: a feature that is
           // switched off should not have a reachable back door.
-          case 'escrow_quote': {
-            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
-            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
-            let amount: bigint;
-            try { amount = BigInt(String(body.amountMinor ?? '')); }
-            catch { return reply(400, { error: 'bad_amount' }); }
-            if (amount <= 0n) return reply(400, { error: 'bad_amount' });
-            const q = await d.escrow.quoteFor(amount);
-            return reply(200, {
-              amountMinor: q.amountMinor.toString(),
-              feeBps: q.feeBps,
-              feeMinimumMinor: q.feeMinimumMinor.toString(),
-              feeAmountMinor: q.feeAmountMinor.toString(),
-              totalMinor: q.totalMinor.toString(),
-              effectiveRate: q.effectiveRate,
-              flooredByMinimum: q.flooredByMinimum,
-            });
-          }
           case 'escrow_state': {
+            // Arbitration: an admin reading any escrow. Only reachable after
+            // Grainlify's live admin check.
             if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
             const e = await d.escrow.detail(f.subject);
             return e ? reply(200, { escrow: e }) : reply(404, { error: 'no_escrow' });
@@ -431,14 +460,6 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           case 'escrow_list': {
             if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
             return reply(200, { escrows: await d.escrow.all() });
-          }
-          case 'escrow_confirm': {
-            if (!d.escrow) return reply(503, { error: 'escrow_not_configured' });
-            if (!(await d.escrow.enabled())) return reply(403, { error: 'funded_bounties_disabled' });
-            const sig = String(body.signature ?? '');
-            if (!sig) return reply(400, { error: 'signature_required' });
-            const r = await d.escrow.confirmFunding(f.subject, sig);
-            return r.ok ? reply(200, r) : reply(409, r);
           }
           case 'list_repos':
             return reply(200, { repos: await d.service.repoBountyStates() });
