@@ -505,6 +505,18 @@ describe.skipIf(!dbUrl)('funded bounties', () => {
     });
   });
 
+  describe('a test run', () => {
+    it('marks a funded bounty as a test, waiving only the one rule a test may, on the record', async () => {
+      const { bountyId } = await fundedBounty();
+      expect(await funded.markTest(bountyId, 'owen', ['account_too_new'])).toMatchObject({ ok: false, error: 'not_waivable' });
+      expect(await funded.markTest(bountyId, 'owen', ['block_org_members'])).toMatchObject({ ok: true });
+      const b = (await db.query('SELECT is_test, waived_eligibility_rules FROM bounties WHERE id = $1', [bountyId])).rows[0];
+      expect(b).toEqual({ is_test: true, waived_eligibility_rules: ['block_org_members'] });
+      const a = (await db.query(`SELECT actor FROM audit_log WHERE action = 'bounty.marked_test' AND subject = $1`, [bountyId])).rows;
+      expect(a).toEqual([{ actor: 'owen' }]);
+    });
+  });
+
   describe('the chain wins', () => {
     it('an escrow cancelled before anybody was assigned cancels the bounty', async () => {
       const { bountyId, escrowAddress } = await fundedBounty();

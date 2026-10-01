@@ -940,6 +940,22 @@ export class FundedService {
     return null;
   }
 
+  /**
+   * Mark a funded bounty as a test, visibly, optionally waiving the one rule
+   * a test may waive. For the devnet run: the person testing has an account
+   * in the org, and the test has to be marked as one wherever it is shown.
+   * Recorded in the audit log, never a silent edit.
+   */
+  async markTest(bountyId: string, actor: string, waive: string[]) {
+    const b = await this.row(bountyId);
+    if (!b) return fail(404, 'not_a_funded_bounty', 'that is not a funded bounty');
+    const rules = waive.filter((w) => w === 'block_org_members');
+    if (rules.length !== waive.length) return fail(400, 'not_waivable', 'only block_org_members may be waived');
+    await this.d.db.query('UPDATE bounties SET is_test = true, waived_eligibility_rules = $2, updated_at = now() WHERE id = $1', [bountyId, rules]);
+    await this.audit(actor, 'bounty.marked_test', bountyId, { waived: rules });
+    return { ok: true as const, waived: rules };
+  }
+
   // ------------------------------------------------------------ in public
 
   /**

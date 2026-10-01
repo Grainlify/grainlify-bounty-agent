@@ -11,6 +11,8 @@
 //                                         decision (no abandon); they are told the reason
 //   bounty tell-closed <assignment-id> --actor <login> --reason <text>
 //                                         tell a holder released earlier that the round closed
+//   bounty mark-test <bounty-id> --actor <login> [--waive block_org_members]
+//                                         mark a funded bounty as a test, shown as one everywhere
 //
 // `approve` talks to the agent over HTTP and signs locally: the approver key
 // never leaves this machine and never reaches the agent.
@@ -115,6 +117,18 @@ async function main() {
       console.log(`  applications open until ${w.closesAt}`);
       if (flag('waive')) console.log(`  waives: ${flag('waive')}`);
       if (rest.includes('--newcomers')) console.log('  reserved for newcomers (nobody with a completed bounty can win it)');
+    } else if (cmd === 'bounty' && sub === 'mark-test' && rest[0]) {
+      const flag = (name: string) => {
+        const i = rest.indexOf(`--${name}`);
+        return i >= 0 ? (rest[i + 1] ?? '') : undefined;
+      };
+      const actor = flag('actor');
+      if (!actor) throw new Error('--actor <login> is required: the audit log records who marked it');
+      const { funded } = await (await import('./wiring.ts')).wire();
+      if (!funded) throw new Error('funded bounties are not configured on this agent');
+      const r = await funded.markTest(rest[0], actor, flag('waive') ? [flag('waive')!] : []);
+      if (!r.ok) throw new Error(r.detail);
+      console.log(`marked ${rest[0]} as a TEST bounty${r.waived.length ? `; waives ${r.waived.join(', ')}` : ''}`);
     } else if (cmd === 'bounty' && sub === 'propose' && rest[0] && rest[1]) {
       const r = await service.proposeBounty(rest[0], Number(rest[1]), process.env.MAINTAINER ?? 'maintainer', rest[2]);
       console.log(`posted bounty ${r.bountyId}: ${r.amount} minor units; ${r.commentUrl}`);
