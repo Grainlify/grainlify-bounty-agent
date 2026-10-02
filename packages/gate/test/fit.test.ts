@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { acceptanceCriteriaFrom, FIT_CAPS, FIT_SYSTEM_PROMPT, fitUserContent, parseFit } from '../src/fit.ts';
+import { acceptanceCriteriaFrom, FIT_CAPS, FIT_CONCERNS, FIT_SYSTEM_PROMPT, fitUserContent, parseFit } from '../src/fit.ts';
 
 describe('the fit prompt, ported from AI-specs.md §4.4', () => {
   // The spec: "The fairness rules are not padding. Without explicit
@@ -35,6 +35,22 @@ describe('the fit prompt, ported from AI-specs.md §4.4', () => {
 
   it('defines weak as evidence that contradicts capability, not evidence that is thin', () => {
     expect(FIT_SYSTEM_PROMPT).toContain('the evidence actively CONTRADICTS capability');
+  });
+
+  // Weak is a quarter of a ticket. The verbatim example - "no code in the
+  // required language at all" - is also true of somebody with no public code
+  // at all, which is most newcomers.
+  it('says in so many words that no public evidence is plausible, never weak', () => {
+    expect(FIT_SYSTEM_PROMPT).toContain('- Absence of public evidence is NOT weak fit.');
+    expect(FIT_SYSTEM_PROMPT).toContain('answer "plausible" with difficulty_match "matched"');
+    expect(FIT_SYSTEM_PROMPT).toContain('having nothing visible contradicts\n  nothing');
+    expect(FIT_SYSTEM_PROMPT).not.toContain('no code in the required language at all');
+    expect(FIT_SYSTEM_PROMPT).toContain('plenty of visible code, but none of it in the\n              required language');
+  });
+
+  it('lists every concern the parser accepts, so each one can actually appear', () => {
+    for (const c of FIT_CONCERNS) expect(FIT_SYSTEM_PROMPT).toContain(`"${c}"`);
+    expect(FIT_SYSTEM_PROMPT).toContain('This is a note, not a penalty');
   });
 
   it('treats the issue as untrusted too, without blaming the applicant for it', () => {
@@ -165,6 +181,14 @@ describe('parsing the answer', () => {
       expect(r.malformed).toBe(true);
       expect(r.assessment.fit).toBe('plausible');
     }
+  });
+
+  it('keeps each concern the prompt now lists', () => {
+    const r = parseFit(JSON.stringify({
+      fit: 'plausible', difficulty_match: 'matched', evidence: 'No public repositories.', relevant_languages_present: false, read_the_issue: true,
+      concerns: ['no_public_code', 'evidence_contradicts_claims'],
+    }));
+    expect(r).toMatchObject({ malformed: false, assessment: { fit: 'plausible', concerns: ['no_public_code', 'evidence_contradicts_claims'] } });
   });
 
   it('keeps only concerns the spec defines', () => {
