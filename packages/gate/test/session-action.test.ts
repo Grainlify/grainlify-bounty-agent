@@ -4,6 +4,8 @@ import {
   parseSessionActionMessage,
   SESSION_ADMIN_DOMAIN,
   SESSION_APPLY_DOMAIN,
+  SESSION_ERASURE_DOMAIN,
+  SESSION_MAINTAINER_DOMAIN,
   verifySessionAction,
 } from '../src/session-action.ts';
 
@@ -85,5 +87,40 @@ describe('acting on behalf of a signed-in Grainlify user', () => {
     const msg =
       'Grainlify: admin action\nAction: run_draw\nGitHub: Jagadeeshftw (id 583231)\nSubject: b3f1a0be-27d4-4c85-9f9c-1a0be27d4c85\nNonce: 3f9c1a0be27d4c853f9c1a0be27d4c85\nIssued: 2026-09-27T09:30:00Z\nExpires: 2026-09-27T09:40:00Z';
     expect(parseSessionActionMessage(msg)).toMatchObject({ kind: 'admin', action: 'run_draw', login: 'Jagadeeshftw', githubUserId: 583231 });
+  });
+
+  // Erasure (Grainlify-Backend internal/erasure AgentErasureMessage). The
+  // exact text the backend signs, with an empty subject.
+  describe('erasure messages', () => {
+    const erasure = (at = issued) => [
+      'Grainlify: erase account',
+      'Action: erase',
+      'GitHub: Octocat (id 583231)',
+      'Subject: ',
+      `Nonce: ${randomBytes(16).toString('hex')}`,
+      `Issued: ${iso(at)}`,
+      `Expires: ${iso(new Date(at.getTime() + 600_000))}`,
+    ].join('\n');
+
+    it('accepts the backend\'s erasure message under the erasure domain', () => {
+      const r = verifySessionAction(signed(erasure(), SESSION_ERASURE_DOMAIN), key.publicB64, 'erasure', now);
+      expect(r).toMatchObject({ ok: true, fields: { kind: 'erasure', action: 'erase', githubUserId: 583231, subject: '' } });
+    });
+
+    it('no other signature can be presented as an erasure', () => {
+      for (const domain of [SESSION_APPLY_DOMAIN, SESSION_ADMIN_DOMAIN, SESSION_MAINTAINER_DOMAIN]) {
+        expect(verifySessionAction(signed(erasure(), domain), key.publicB64, 'erasure', now)).toMatchObject({ ok: false, code: 'bad_countersignature' });
+      }
+      // An apply message, correctly signed for applying, is the wrong kind.
+      expect(verifySessionAction(signed(message({}), SESSION_APPLY_DOMAIN), key.publicB64, 'erasure', now)).toMatchObject({ ok: false, code: 'wrong_domain' });
+    });
+
+    it('an erasure cannot be presented as an apply or admin action', () => {
+      for (const kind of ['apply', 'admin', 'maintainer'] as const) {
+        const r = verifySessionAction(signed(erasure(), SESSION_ERASURE_DOMAIN), key.publicB64, kind, now);
+        expect(r).toMatchObject({ ok: false, code: 'wrong_domain' });
+        if (!r.ok) expect(r.reason).toContain('an erasure message');
+      }
+    });
   });
 });

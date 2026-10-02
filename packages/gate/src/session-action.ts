@@ -30,6 +30,14 @@ import { createPublicKey, verify } from 'node:crypto';
 export const SESSION_APPLY_DOMAIN = 'grainlify-bounty-apply:v1\n';
 export const SESSION_ADMIN_DOMAIN = 'grainlify-bounty-admin:v1\n';
 export const SESSION_MAINTAINER_DOMAIN = 'grainlify-bounty-maintainer:v1\n';
+/**
+ * Erasing a person's account at their request (Grainlify-Backend
+ * internal/erasure). A fourth domain, for the reason the other three are
+ * separate: an erasure must never be forgeable from an apply, admin or
+ * maintainer signature, and none of those from an erasure. Grainlify signs it
+ * only from its own erasure executor, after the person's grace period.
+ */
+export const SESSION_ERASURE_DOMAIN = 'grainlify-account-erasure:v1\n';
 export const SESSION_ACTION_MAX_WINDOW_MS = 10 * 60_000;
 const CLOCK_SKEW_MS = 60_000;
 const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
@@ -39,7 +47,7 @@ const SPKI_PREFIX = Buffer.from('302a300506032b6570032100', 'hex');
 // caller writes can add a line to the message.
 const MESSAGE = new RegExp(
   [
-    '^Grainlify: (apply for a bounty|admin action|maintainer action)',
+    '^Grainlify: (apply for a bounty|admin action|maintainer action|erase account)',
     'Action: ([a-z][a-z0-9_]{0,63})',
     'GitHub: ([A-Za-z0-9](?:[A-Za-z0-9-]{0,38})) \\(id ([1-9][0-9]{0,15})\\)',
     // '/' is here so a subject can be a repository name (Owner/name). It
@@ -53,17 +61,19 @@ const MESSAGE = new RegExp(
   ].join('\\n'),
 );
 
-export type SessionActionKind = 'apply' | 'admin' | 'maintainer';
+export type SessionActionKind = 'apply' | 'admin' | 'maintainer' | 'erasure';
 
 const HEADLINE: Record<string, SessionActionKind> = {
   'apply for a bounty': 'apply',
   'admin action': 'admin',
   'maintainer action': 'maintainer',
+  'erase account': 'erasure',
 };
 const DOMAIN: Record<SessionActionKind, string> = {
   apply: SESSION_APPLY_DOMAIN,
   admin: SESSION_ADMIN_DOMAIN,
   maintainer: SESSION_MAINTAINER_DOMAIN,
+  erasure: SESSION_ERASURE_DOMAIN,
 };
 
 export interface SessionActionFields {
@@ -122,7 +132,7 @@ export function verifySessionAction(
   // the wrong kind, rather than as a bad signature - they need different
   // answers, and conflating them has cost a round of diagnosis before.
   if (fields.kind !== expect) {
-    return { ok: false, code: 'wrong_domain', reason: `this is ${fields.kind === 'apply' ? 'an apply' : `a ${fields.kind}`} message; this endpoint needs ${expect === 'apply' ? 'an apply' : `a ${expect}`} one` };
+    return { ok: false, code: 'wrong_domain', reason: `this is ${withArticle(fields.kind)} message; this endpoint needs ${withArticle(expect)} one` };
   }
   const domain = DOMAIN[expect];
   if (!verifyCountersignature(domain, message, countersignature, countersignPublicKeyB64)) {
@@ -135,6 +145,10 @@ export function verifySessionAction(
   }
   if (t > fields.expiresAt.getTime()) return { ok: false, code: 'expired', reason: 'the message expired; try again' };
   return { ok: true, fields };
+}
+
+function withArticle(kind: SessionActionKind): string {
+  return `${/^[aeiou]/.test(kind) ? 'an' : 'a'} ${kind}`;
 }
 
 function verifyCountersignature(domain: string, message: string, sigB64: string, pubB64: string): boolean {
