@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { verifyApproval, type Approval, type PayoutTerms } from '../../../packages/gate/src/approval.ts';
 import { isTestCarveOut, repoMayHaveBounties } from '../../../packages/gate/src/bounty-repos.ts';
+import { reopenAfterUnmergedClose } from './draw-service.ts';
 import { dedupe, enqueueEvent } from './events.ts';
 import { evaluateGate, type GateFacts, type GateResult } from '../../../packages/gate/src/gate.ts';
 import { parseAndVerifyLinkComment } from '../../../packages/gate/src/link.ts';
@@ -578,6 +579,11 @@ export class BountyService {
             WHERE bounty_id = $1 AND status = 'pr_submitted' AND qualifying_pr_number = $2`,
           [b.id, pr.number],
         );
+        // And the bounty stops saying "PR in review" once no pull request is
+        // open on it. Leaving it in_review is what stranded #35: the sweep
+        // only redraws 'posted', so after the holder's deadline it was held by
+        // nobody and could never be drawn again. Recorded, publicly, with why.
+        await reopenAfterUnmergedClose(this.d.db, { bountyId: String(b.id), actor: 'agent', source: 'webhook' });
         continue;
       }
       const gate = await this.runGate(fullName, repo!, b, pr);

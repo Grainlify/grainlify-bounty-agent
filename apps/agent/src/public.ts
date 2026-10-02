@@ -74,7 +74,10 @@ export interface PublicStatus {
 
 export type BountyHistoryEntry =
   | { kind: 'draw'; at: string; by: string; drawn: string | null }
-  | { kind: 'unassign'; at: string; by: string; contributor: string };
+  | { kind: 'unassign'; at: string; by: string; contributor: string }
+  // Back to open because its pull request closed unmerged. The reason is the
+  // fact, not anybody's words, and the PR is public on GitHub already.
+  | { kind: 'reopened'; at: string; by: string; reason: string; prNumber: number | null; contributor: string | null };
 
 export interface PublicBounty {
   id: string;
@@ -105,7 +108,7 @@ export interface PublicBounty {
   assignedTo: string | null;
   assignmentStaleAt: string | null;
   /**
-   * Every real draw and every unassign on this bounty, oldest first. Public so
+   * Every real draw, every unassign and every reopening on this bounty, oldest first. Public so
    * that a maintainer who keeps unassigning and redrawing until somebody they
    * prefer wins does it in plain sight. Who acted, when, and who was drawn or
    * unassigned - names already public as assignedTo. Not the reason given for
@@ -243,12 +246,23 @@ export class PublicApi {
           WHERE bounty_id = ANY($1::uuid[]) AND status = 'released_voluntary' AND released_by IS NOT NULL`,
         [ids],
       );
+      const reopens = await this.db.query<{ subject: string; at: Date; actor: string; detail: { reason?: string; prNumber?: number; contributor?: string } }>(
+        `SELECT subject, at, actor, detail FROM audit_log
+          WHERE action = 'bounty.reopened' AND subject = ANY($1::text[])`,
+        [ids],
+      );
       const add = (id: string, e: BountyHistoryEntry) => history.set(id, [...(history.get(id) ?? []), e]);
       for (const d of draws.rows) {
         add(d.bounty_id, { kind: 'draw', at: new Date(d.created_at).toISOString(), by: d.triggered_by ?? 'automatic', drawn: d.winner_login });
       }
       for (const u of unassigns.rows) {
         add(u.bounty_id, { kind: 'unassign', at: new Date(u.released_at).toISOString(), by: u.released_by, contributor: u.github_login });
+      }
+      for (const r of reopens.rows) {
+        add(r.subject, {
+          kind: 'reopened', at: new Date(r.at).toISOString(), by: r.actor,
+          reason: r.detail.reason ?? 'reopened', prNumber: r.detail.prNumber ?? null, contributor: r.detail.contributor ?? null,
+        });
       }
       for (const list of history.values()) list.sort((a, b) => a.at.localeCompare(b.at));
     }

@@ -30,7 +30,7 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
     api = new PublicApi(db, p2Config({ mints: {}, trustedApprovers: [] }));
   });
   beforeEach(async () => {
-    await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, bounties CASCADE');
+    await db.query('TRUNCATE bounty_assignments, bounty_draws, bounty_applications, bounties, audit_log CASCADE');
     await db.query(`INSERT INTO repos (owner, name, enabled, bounties_enabled, registered_project) VALUES ('Grainlify','test-repo', true, true, true)
                     ON CONFLICT (owner,name) DO UPDATE SET enabled = true, bounties_enabled = true, registered_project = true`);
     repoId = (await db.query<{ id: string }>(`SELECT id FROM repos WHERE owner='Grainlify' AND name='test-repo'`)).rows[0]!.id as unknown as number;
@@ -69,7 +69,7 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
     expect((await api.bounties(id))[0]).toMatchObject({ assignedTo: null });
   });
 
-  it('publishes every real draw and every unassign, in order, without the reason', async () => {
+  it('publishes every real draw, unassign and reopening, in order, without an unassign\'s reason', async () => {
     // Steering in plain sight: a maintainer who keeps unassigning and
     // redrawing until somebody they prefer wins does it on the public record.
     const id = await bounty({ closeAt: new Date(Date.now() - 1000).toISOString() });
@@ -85,11 +85,19 @@ describe.skipIf(!dbUrl)('the public bounties feed', () => {
       `INSERT INTO bounty_assignments (bounty_id, github_user_id, github_login, status, stale_at, released_at, counts_as_abandon)
        VALUES ($1, 43, 'quiet', 'released_stale', $2, $2, true)`, [id, at(11)]);
 
+    // Back to open after the holder's pull request closed unmerged.
+    await db.query(
+      `INSERT INTO audit_log (actor, action, subject, detail, at) VALUES ('agent','bounty.reopened',$1,$2,$3)`,
+      [id, JSON.stringify({ reason: 'pull request closed without merging', prNumber: 37, contributor: 'second', holder: 'second' }), at(10)]);
+    // Another bounty's reopening is not this one's.
+    await db.query(`INSERT INTO audit_log (actor, action, subject, detail) VALUES ('agent','bounty.reopened',$1,'{}')`, [randomUUID()]);
+
     const h = (await api.bounties(id))[0]!.history;
     expect(h).toEqual([
       { kind: 'draw', at: at(0), by: 'automatic', drawn: 'first' },
       { kind: 'unassign', at: at(5), by: 'maint', contributor: 'first' },
       { kind: 'draw', at: at(9), by: 'maint', drawn: 'second' },
+      { kind: 'reopened', at: at(10), by: 'agent', reason: 'pull request closed without merging', prNumber: 37, contributor: 'second' },
     ]);
     expect(JSON.stringify(h)).not.toContain('private reason');
   });

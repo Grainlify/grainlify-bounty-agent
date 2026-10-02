@@ -71,6 +71,94 @@ export interface DrawOutcome {
 /** Permission levels that mean "this person is on the inside of the repo". */
 const INSIDER = ['admin', 'maintain', 'write'];
 
+/** Why a bounty went back to open, as the public history says it. */
+export const REOPEN_REASON = 'pull request closed without merging';
+
+export type ReopenOutcome =
+  | { reopened: true; bountyId: string; prNumber: number; contributor: string; holder: string | null; holderReset: boolean; held: boolean }
+  | { reopened: false; bountyId: string; why: 'no_such_bounty' | 'not_in_review' | 'pr_open' | 'pr_merged' | 'no_closed_pr' };
+
+/**
+ * A bounty that says "PR in review" when no pull request is open on it goes
+ * back to 'posted', and the public history says why.
+ *
+ * Only the assignment moved when a pull request closed unmerged: the holder
+ * was made live again, the bounty kept saying in_review, and the draw sweep
+ * and apply() both act on 'posted' alone. So once the holder's deadline
+ * released them, nobody held the bounty and nothing could ever draw it again
+ * - #35 after PR #37 was closed on 1 October. 'posted' with a live holder is
+ * the ordinary assigned state, so nothing else has to learn a new one: the
+ * deadline, the stale release and the redraw from the existing pool carry on
+ * as they would have. A funded bounty goes back to 'posted' too, which is the
+ * state its funder's own draw and assign need.
+ *
+ * Shared by the webhook and the repair command, so a bounty repaired after the
+ * fact leaves the same record as one handled as it happened. One transaction,
+ * the bounty row locked, and the audit row written with the change: a status
+ * that moved without its record is the silent edit this must never be.
+ * Idempotent - a second call finds nothing in review and changes nothing.
+ *
+ * `hold` leaves the next draw to a person (awaiting_redraw), for when somebody
+ * has to decide who may be in it before it runs.
+ */
+export async function reopenAfterUnmergedClose(
+  db: pg.Pool,
+  input: { bountyId: string; actor: string; source: 'webhook' | 'repair'; hold?: boolean },
+): Promise<ReopenOutcome> {
+  const { bountyId } = input;
+  const client = await db.connect();
+  try {
+    await client.query('BEGIN');
+    const no = async (why: Extract<ReopenOutcome, { reopened: false }>['why']): Promise<ReopenOutcome> => {
+      await client.query('ROLLBACK');
+      return { reopened: false, bountyId, why };
+    };
+    const b = (await client.query<{ status: string }>('SELECT status FROM bounties WHERE id = $1 FOR UPDATE', [bountyId])).rows[0];
+    if (!b) return await no('no_such_bounty');
+    if (b.status !== 'in_review') return await no('not_in_review');
+
+    const subs = await client.query<{ pr_number: number; author_login: string; state: string }>(
+      'SELECT pr_number, author_login, state FROM submissions WHERE bounty_id = $1 ORDER BY updated_at DESC', [bountyId]);
+    // Somebody's pull request is still open, so "in review" is true.
+    if (subs.rows.some((s) => s.state === 'open')) return await no('pr_open');
+    // A merge belongs to the payout path, whatever the gate made of it.
+    if (subs.rows.some((s) => s.state === 'merged')) return await no('pr_merged');
+    const closed = subs.rows.find((s) => s.state === 'closed');
+    if (!closed) return await no('no_closed_pr');
+
+    // A holder still marked as having submitted is live again: the webhook
+    // does this as the close arrives, and this is the same rule for a close it
+    // missed. Their deadline is the one they were given; a closed pull
+    // request is not a reason to move it.
+    const reset = await client.query(
+      `UPDATE bounty_assignments SET status = 'active', updated_at = now()
+        WHERE bounty_id = $1 AND status = 'pr_submitted'`,
+      [bountyId]);
+    const holder = (await client.query<{ github_login: string }>(
+      `SELECT github_login FROM bounty_assignments WHERE bounty_id = $1 AND status IN ('active','pr_submitted')`, [bountyId],
+    )).rows[0]?.github_login ?? null;
+    const holderReset = (reset.rowCount ?? 0) > 0;
+    const held = input.hold === true;
+
+    await client.query(
+      'UPDATE bounties SET status = \'posted\', awaiting_redraw = awaiting_redraw OR $2, updated_at = now() WHERE id = $1',
+      [bountyId, held]);
+    await client.query(
+      `INSERT INTO audit_log (actor, action, subject, detail) VALUES ($1,'bounty.reopened',$2,$3)`,
+      [input.actor, bountyId, JSON.stringify({
+        reason: REOPEN_REASON, previousStatus: b.status, prNumber: closed.pr_number, contributor: closed.author_login,
+        holder, holderReset, held, source: input.source,
+      })]);
+    await client.query('COMMIT');
+    return { reopened: true, bountyId, prNumber: closed.pr_number, contributor: closed.author_login, holder, holderReset, held };
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 export class DrawService {
   constructor(private readonly d: DrawDeps) {}
 
