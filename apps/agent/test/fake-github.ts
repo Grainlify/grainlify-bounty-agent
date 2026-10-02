@@ -14,6 +14,10 @@ export class FakeGitHub implements GitHubApi {
   /** Per-login evidence for the fit assessment; anything unset is a thin but
    *  valid profile, which is the common newcomer case. */
   evidence = new Map<string, ContributorEvidence>();
+  /** Primary language per repository; unset is a repository GitHub reports none for. */
+  languages = new Map<string, string>();
+  /** How many times each read was made, for the tests that care about caching. */
+  reads = { issue: 0, language: 0 };
   private nextId = 1000;
 
   key = (repo: string, n: number) => `${repo.toLowerCase()}#${n}`;
@@ -34,6 +38,7 @@ export class FakeGitHub implements GitHubApi {
     };
   }
   async getIssue(repo: string, n: number) {
+    this.reads.issue++;
     const i = this.issues.get(this.key(repo, n));
     if (!i) throw new Error(`no issue ${repo}#${n}`);
     return i;
@@ -49,6 +54,10 @@ export class FakeGitHub implements GitHubApi {
   }
   async closingIssues(repo: string, n: number) {
     return this.pulls.get(this.key(repo, n))?.closes ?? [];
+  }
+  async repoLanguage(repo: string) {
+    this.reads.language++;
+    return this.languages.get(repo.toLowerCase()) ?? null;
   }
   async getUser(_repo: string, login: string) {
     if (this.failUserLookup) throw new Error('GitHub 502');

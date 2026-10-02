@@ -34,6 +34,8 @@ export interface GitHubApi {
   getPull(repo: string, n: number): Promise<PullInfo>;
   getPullDiff(repo: string, n: number, maxChars: number): Promise<string>;
   closingIssues(repo: string, prNumber: number): Promise<number[]>;
+  /** The repository's primary language as GitHub reports it (most bytes), or null when it has none. */
+  repoLanguage(repo: string): Promise<string | null>;
   /** Read with the repo's installation token (higher rate limit than anonymous). */
   getUser(repo: string, login: string): Promise<UserInfo>;
   permission(repo: string, login: string): Promise<RepoPermission>;
@@ -140,6 +142,11 @@ export class GitHubAppClient implements GitHubApi {
     const nodes = r.data?.repository?.pullRequest?.closingIssuesReferences?.nodes ?? [];
     // Same-repository issues only: a PR here can't claim a bounty elsewhere.
     return nodes.filter((x) => x.repository.nameWithOwner.toLowerCase() === repo.toLowerCase()).map((x) => x.number);
+  }
+
+  async repoLanguage(repo: string) {
+    const r = (await this.repoReq(repo, 'GET', `/repos/${repo}`)) as { language: string | null };
+    return r.language ?? null;
   }
 
   async getUser(repo: string, login: string): Promise<UserInfo> {

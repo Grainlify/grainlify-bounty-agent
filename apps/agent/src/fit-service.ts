@@ -10,7 +10,7 @@
 import type pg from 'pg';
 import type { X402Client } from '../../../packages/x402/src/client.ts';
 import { X402_PATHS } from '../../../packages/x402/src/protocol.ts';
-import { FIT_SYSTEM_PROMPT, fitUserContent, parseFit, type FitAssessment } from '../../../packages/gate/src/fit.ts';
+import { acceptanceCriteriaFrom, FIT_SYSTEM_PROMPT, fitUserContent, parseFit, type FitAssessment } from '../../../packages/gate/src/fit.ts';
 import { boolOf } from '../../../packages/gate/src/draw-config.ts';
 import type { AgentConfig } from './config.ts';
 import type { ContributorEvidence, GitHubApi } from './github.ts';
@@ -34,6 +34,13 @@ export interface FitDeps {
   x402: X402Client;
   cfg: AgentConfig;
   now: () => Date;
+}
+
+/** What the model is told about the issue, besides its title and tier. */
+export interface IssueContext {
+  body: string;
+  acceptanceCriteria: string;
+  primaryLanguage: string;
 }
 
 export interface FitOutcome {
@@ -92,6 +99,48 @@ export class FitService {
   }
 
   /**
+   * The issue's body, acceptance criteria and language, from the snapshot
+   * when it is fresh.
+   *
+   * One fetch per bounty rather than per application, and the same text for
+   * everybody who applies in the same week (0016_bounty_issue_snapshots.sql).
+   * Read here, only once an assessment is actually being bought: with the
+   * assessment off nothing is fetched at all.
+   *
+   * A part that cannot be read is sent empty rather than failing the
+   * assessment, and the snapshot is not kept, so the next applicant tries
+   * again instead of inheriting the gap for a week.
+   */
+  async issueContext(bountyId: string, repo: string, issueNumber: number): Promise<IssueContext> {
+    const cached = await this.d.db.query<{ body: string; acceptance_criteria: string; primary_language: string; built_at: Date }>(
+      `SELECT body, acceptance_criteria, primary_language, built_at FROM bounty_issue_snapshots WHERE bounty_id = $1`,
+      [bountyId],
+    );
+    const row = cached.rows[0];
+    if (row && this.d.now().getTime() - new Date(row.built_at).getTime() < SNAPSHOT_TTL_MS) {
+      return { body: row.body, acceptanceCriteria: row.acceptance_criteria, primaryLanguage: row.primary_language };
+    }
+
+    const missing: string[] = [];
+    const [issue, language] = await Promise.all([
+      this.d.gh.getIssue(repo, issueNumber).catch(() => { missing.push('issue'); return null; }),
+      this.d.gh.repoLanguage(repo).catch(() => { missing.push('repository language'); return null; }),
+    ]);
+    const body = issue?.body ?? '';
+    const ctx: IssueContext = { body, acceptanceCriteria: acceptanceCriteriaFrom(body), primaryLanguage: language ?? '' };
+    if (missing.length) return ctx;
+    await this.d.db.query(
+      `INSERT INTO bounty_issue_snapshots (bounty_id, body, acceptance_criteria, primary_language, built_at, build_note)
+       VALUES ($1,$2,$3,$4,$5,$6)
+       ON CONFLICT (bounty_id) DO UPDATE SET body = EXCLUDED.body, acceptance_criteria = EXCLUDED.acceptance_criteria,
+         primary_language = EXCLUDED.primary_language, built_at = EXCLUDED.built_at, build_note = EXCLUDED.build_note`,
+      [bountyId, ctx.body, ctx.acceptanceCriteria, ctx.primaryLanguage, this.d.now().toISOString(),
+       language === null ? 'the repository has no primary language on GitHub' : null],
+    );
+    return ctx;
+  }
+
+  /**
    * Assesses one application and writes the result onto it.
    *
    * Every failure path lands on 'plausible' with a full ticket, because the
@@ -105,7 +154,7 @@ export class FitService {
     githubUserId: number;
     githubLogin: string;
     repo: string;
-    issue: { title: string; body: string; acceptanceCriteria: string; difficultyTier: string; primaryLanguage: string };
+    issue: { number: number; title: string; difficultyTier: string };
     applicationText: string;
     enabled: boolean;
   }): Promise<FitOutcome> {
@@ -114,7 +163,9 @@ export class FitService {
       return { assessment: PLAUSIBLE, callId: null, costMicro: 0, skipped: 'fit_assessment_off', malformed: false };
     }
 
-    const evidence = await this.evidenceFor(input.repo, input.githubUserId, input.githubLogin, input.issue.primaryLanguage);
+    const context = await this.issueContext(input.bountyId, input.repo, input.issue.number);
+    const issue = { title: input.issue.title, difficultyTier: input.issue.difficultyTier, ...context };
+    const evidence = await this.evidenceFor(input.repo, input.githubUserId, input.githubLogin, issue.primaryLanguage);
     const model = this.d.cfg.routing.review.model;
 
     let record: Awaited<ReturnType<X402Client['call']>>['record'];
@@ -129,7 +180,7 @@ export class FitService {
           max_tokens: 400,
           messages: [
             { role: 'system', content: FIT_SYSTEM_PROMPT },
-            { role: 'user', content: fitUserContent({ issue: input.issue, evidence, applicationText: input.applicationText }) },
+            { role: 'user', content: fitUserContent({ issue, evidence, applicationText: input.applicationText }) },
           ],
         },
         links: { bountyId: input.bountyId, applicationId: input.applicationId },

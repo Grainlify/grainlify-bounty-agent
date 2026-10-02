@@ -382,12 +382,13 @@ export class DrawService {
           githubUserId: input.githubUserId,
           githubLogin: input.githubLogin,
           repo,
+          // The body, its acceptance criteria and the repository's language
+          // are read by the fit service itself, once per bounty, and only
+          // when an assessment is actually being bought.
           issue: {
+            number: issue.rows[0]?.issue_number ?? 0,
             title: issue.rows[0]?.issue_title ?? `Issue #${issue.rows[0]?.issue_number ?? 0}`,
-            body: '',
-            acceptanceCriteria: '',
             difficultyTier: cfg.fit_difficulty_tier ?? 'standard',
-            primaryLanguage: '',
           },
           applicationText,
           enabled: fitEnabled(cfg),
