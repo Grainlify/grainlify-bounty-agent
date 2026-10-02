@@ -178,4 +178,79 @@ describe.skipIf(!dbUrl)('a pull request closed without merging', () => {
     expect(r).toMatchObject({ released: [], drawn: [] });
     expect((await assignment(id)).status).toBe('active');
   });
+
+  describe('repairing a bounty already stranded, the way #35 is', () => {
+    /** #35 as the deployed code leaves it: closed PR, holder released at their deadline, bounty still in_review. */
+    const stranded = async () => {
+      const id = await drawnBounty(35);
+      await prOpened(id, 37, 35);
+      await db.query(`UPDATE submissions SET state = 'closed' WHERE bounty_id = $1`, [id]);
+      await db.query(
+        `UPDATE bounty_assignments SET status = 'released_stale', released_at = now(), counts_as_abandon = false,
+                release_reason = 'deadline passed after their pull request was closed unmerged' WHERE bounty_id = $1`, [id]);
+      await db.query(`UPDATE bounty_applications SET status = 'lost' WHERE bounty_id = $1`, [id]);
+      closeUnmerged(37);
+      return id;
+    };
+
+    it('is what the deployed code does today: nothing ever draws it', async () => {
+      const id = await stranded();
+      const r = await draw.closeDueWindows();
+      expect(r.drawn).toEqual([]);
+      expect((await bounty(id)).status).toBe('in_review');
+    });
+
+    it('reopens it through the same path, on the record, and the sweep then draws from the existing pool', async () => {
+      const id = await stranded();
+      const r = await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'Jagadeeshftw' });
+      expect(r).toMatchObject({ reopened: true, prNumber: 37, contributor: 'holder', holder: null, held: false });
+      expect(await reopens(id)).toEqual([{
+        actor: 'Jagadeeshftw',
+        detail: expect.objectContaining({ reason: REOPEN_REASON, prNumber: 37, source: 'repair', holder: null }),
+      }]);
+      expect((await api.bounties(id))[0]!.history).toContainEqual(
+        expect.objectContaining({ kind: 'reopened', by: 'Jagadeeshftw', reason: REOPEN_REASON, prNumber: 37 }));
+
+      const swept = await draw.closeDueWindows();
+      expect(swept.drawn).toEqual([id]);
+      // Both applicants were in it: the person whose PR was closed is not
+      // excluded by this. That is a decision for a person, not for this code.
+      const pool = (await db.query<{ pool: { githubLogin: string }[] }>('SELECT pool FROM bounty_draws WHERE bounty_id = $1', [id])).rows[0]!.pool;
+      expect(pool.map((p) => p.githubLogin).sort()).toEqual(['holder', 'other-dev']);
+    });
+
+    it('with --hold, waits for somebody to press Redraw', async () => {
+      const id = await stranded();
+      expect(await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'Jagadeeshftw', hold: true })).toMatchObject({ reopened: true, held: true });
+      expect((await bounty(id)).awaiting_redraw).toBe(true);
+      expect((await draw.closeDueWindows()).drawn).toEqual([]);
+    });
+
+    it('is idempotent', async () => {
+      const id = await stranded();
+      await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'Jagadeeshftw' });
+      expect(await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'Jagadeeshftw' })).toMatchObject({ reopened: false, why: 'not_in_review' });
+      expect(await reopens(id)).toHaveLength(1);
+    });
+
+    it('asks GitHub about a pull request we still think is open, in case the close never reached us', async () => {
+      const id = await drawnBounty(35);
+      await prOpened(id, 37, 35);
+      closeUnmerged(37);                                              // closed on GitHub; no webhook arrived
+      const r = await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'Jagadeeshftw' });
+      expect(r).toMatchObject({ reopened: true, prNumber: 37, holder: 'holder', holderReset: true });
+      expect((await db.query(`SELECT state FROM submissions WHERE bounty_id = $1`, [id])).rows[0]!.state).toBe('closed');
+      expect((await assignment(id)).status).toBe('active');
+    });
+
+    it('leaves a pull request that is really open, or merged, alone and names it', async () => {
+      const id = await drawnBounty(35);
+      await prOpened(id, 37, 35);
+      expect(await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'x' })).toMatchObject({ reopened: false, why: 'pr_open', prNumber: 37 });
+      Object.assign(gh.pulls.get(gh.key(REPO, 37))!, { state: 'closed', merged: true });
+      expect(await draw.reopenAfterClosedPullRequest({ bountyId: id, actor: 'x' })).toMatchObject({ reopened: false, why: 'pr_merged', prNumber: 37 });
+      expect((await bounty(id)).status).toBe('in_review');
+      expect(await reopens(id)).toEqual([]);
+    });
+  });
 });

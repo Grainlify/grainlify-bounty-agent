@@ -13,6 +13,10 @@
 //                                         tell a holder released earlier that the round closed
 //   bounty mark-test <bounty-id> --actor <login> [--waive block_org_members]
 //                                         mark a funded bounty as a test, shown as one everywhere
+//   bounty reopen <bounty-id> --actor <login> [--hold]
+//                                         put a bounty stuck "in review" after its pull request
+//                                         closed unmerged back to open, on the public record;
+//                                         --hold leaves the next draw to a person pressing Redraw
 //
 // `approve` talks to the agent over HTTP and signs locally: the approver key
 // never leaves this machine and never reaches the agent.
@@ -129,6 +133,25 @@ async function main() {
       const r = await funded.markTest(rest[0], actor, flag('waive') ? [flag('waive')!] : []);
       if (!r.ok) throw new Error(r.detail);
       console.log(`marked ${rest[0]} as a TEST bounty${r.waived.length ? `; waives ${r.waived.join(', ')}` : ''}`);
+    } else if (cmd === 'bounty' && sub === 'reopen' && rest[0]) {
+      const flag = (name: string) => {
+        const i = rest.indexOf(`--${name}`);
+        return i >= 0 ? rest[i + 1] : undefined;
+      };
+      const actor = flag('actor');
+      if (!actor) throw new Error('--actor <login> is required: the public history names who reopened it');
+      const { draw } = await (await import('./wiring.ts')).wire();
+      const r = await draw.reopenAfterClosedPullRequest({ bountyId: rest[0], actor, hold: rest.includes('--hold') });
+      if (!r.reopened) {
+        // Not an error when there is nothing to repair: running it twice is safe.
+        console.log(`not reopened: ${r.why}${'prNumber' in r ? ` (PR #${r.prNumber})` : ''}`);
+        if (r.why !== 'not_in_review') process.exitCode = 1;
+      } else {
+        console.log(`reopened ${rest[0]}: PR #${r.prNumber} by ${r.contributor} closed without merging`);
+        console.log(r.holder ? `  ${r.holder} still holds it until their deadline` : '  nobody holds it');
+        if (r.held) console.log('  the next draw waits for somebody to press Redraw');
+        else if (!r.holder) console.log('  the draw sweep redraws it from the existing pool within a minute (a funded bounty waits for its funder)');
+      }
     } else if (cmd === 'bounty' && sub === 'propose' && rest[0] && rest[1]) {
       const r = await service.proposeBounty(rest[0], Number(rest[1]), process.env.MAINTAINER ?? 'maintainer', rest[2]);
       console.log(`posted bounty ${r.bountyId}: ${r.amount} minor units; ${r.commentUrl}`);
@@ -137,6 +160,7 @@ async function main() {
         'usage: agent repo add <owner/name>\n' +
           '     | bounty propose <owner/name> <issue> [currency]\n' +
           '     | bounty seed <owner/name> <issue> <usd> [--test] [--newcomers] [--waive <rule>] [--title <t>] [--currency <c>]\n' +
+          '     | bounty reopen <bounty-id> --actor <login> [--hold]\n' +
           '     | approve <payout-id>',
       );
       process.exitCode = 2;

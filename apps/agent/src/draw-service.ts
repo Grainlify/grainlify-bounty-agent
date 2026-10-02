@@ -1190,6 +1190,43 @@ export class DrawService {
   }
 
   /**
+   * Repair a bounty left saying "PR in review" after its pull request closed
+   * unmerged: the `bounty reopen` command.
+   *
+   * GitHub is asked first about any pull request still recorded as open on
+   * the bounty, because the close may never have reached us - a webhook that
+   * failed, or a closing reference edited out of the PR before it closed.
+   * What GitHub says is written to the submission exactly as the webhook would
+   * have, and then the same reopen the webhook runs does the rest, with the
+   * same record. A pull request that is really open, or was merged, is left
+   * alone and named.
+   */
+  async reopenAfterClosedPullRequest(input: { bountyId: string; actor: string; hold?: boolean }): Promise<
+    ReopenOutcome | { reopened: false; bountyId: string; why: 'pr_open' | 'pr_merged'; prNumber: number; refreshed: number[] }
+  > {
+    const b = (await this.d.db.query<{ repo: string; status: string }>(
+      `SELECT r.owner||'/'||r.name AS repo, b.status FROM bounties b JOIN repos r ON r.id = b.repo_id WHERE b.id = $1`, [input.bountyId],
+    )).rows[0];
+    if (!b) return { reopened: false, bountyId: input.bountyId, why: 'no_such_bounty' };
+    // Nothing to repair, and no reason to ask GitHub anything.
+    if (b.status !== 'in_review') return { reopened: false, bountyId: input.bountyId, why: 'not_in_review' };
+    const repo = b.repo;
+    const open = await this.d.db.query<{ pr_number: number }>(
+      `SELECT pr_number FROM submissions WHERE bounty_id = $1 AND state = 'open' ORDER BY pr_number`, [input.bountyId]);
+    const refreshed: number[] = [];
+    for (const s of open.rows) {
+      const pr = await this.d.gh.getPull(repo, s.pr_number);
+      if (pr.merged) return { reopened: false, bountyId: input.bountyId, why: 'pr_merged', prNumber: s.pr_number, refreshed };
+      if (pr.state === 'open') return { reopened: false, bountyId: input.bountyId, why: 'pr_open', prNumber: s.pr_number, refreshed };
+      await this.d.db.query(
+        `UPDATE submissions SET state = 'closed', head_sha = $3, updated_at = now() WHERE bounty_id = $1 AND pr_number = $2 AND state = 'open'`,
+        [input.bountyId, s.pr_number, pr.headSha]);
+      refreshed.push(s.pr_number);
+    }
+    return reopenAfterUnmergedClose(this.d.db, { bountyId: input.bountyId, actor: input.actor, source: 'repair', hold: input.hold });
+  }
+
+  /**
    * Move the deadline on a live assignment.
    *
    * Recorded in two places on purpose: the audit log, and a table the
