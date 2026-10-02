@@ -10,7 +10,7 @@ import { freshDatabase } from '../../../packages/db/src/testing.ts';
 import { SESSION_APPLY_DOMAIN, SESSION_ERASURE_DOMAIN } from '../../../packages/gate/src/session-action.ts';
 import { grainlifyKey } from '../../../packages/gate/test/session-support.ts';
 import { p2Config } from '../src/config.ts';
-import { eraseAccount } from '../src/erasure-service.ts';
+import { ERASED_LOGIN, eraseAccount } from '../src/erasure-service.ts';
 import { PublicApi } from '../src/public.ts';
 import { createAgentServer } from '../src/server.ts';
 import { BountyService } from '../src/service.ts';
@@ -135,6 +135,30 @@ describe.skipIf(!dbUrl)('erasing an account', () => {
     expect(await count(`SELECT count(*) AS n FROM bounty_applications WHERE github_user_id = $1`, [71])).toBe(1);
   });
 
+  it('the public ledger hides the login and records the erasure, without editing any row', async () => {
+    await contributor(72, 'ada');
+    await contributor(73, 'grace');
+    await post(erasureBody(72, 'ada'));
+
+    const ledger = await api.ledger();
+    const payouts = ledger.events.filter((e) => e.kind === 'payout').map((e) => e.detail);
+    expect(payouts.some((d) => d.endsWith(`→ ${ERASED_LOGIN}`))).toBe(true);
+    expect(payouts.some((d) => d.endsWith('→ grace'))).toBe(true);
+    expect(payouts.some((d) => d.includes('ada'))).toBe(false);
+
+    const erasures = ledger.events.filter((e) => e.kind === 'erasure');
+    expect(erasures).toHaveLength(1);
+    // The erasure event names nobody.
+    expect(JSON.stringify(erasures[0])).not.toContain('ada');
+    expect(JSON.stringify(erasures[0])).not.toContain('72');
+
+    const bounties = await api.bounties();
+    const drawn = bounties.flatMap((b) => b.history.filter((h) => h.kind === 'draw').map((h) => (h as { drawn: string | null }).drawn));
+    expect(drawn).toContain(ERASED_LOGIN);
+    expect(drawn).toContain('grace');
+    expect(drawn).not.toContain('ada');
+  });
+
   it('is idempotent', async () => {
     await contributor(74, 'ada');
     expect((await post(erasureBody(74, 'ada'))).status).toBe(200);
@@ -142,6 +166,7 @@ describe.skipIf(!dbUrl)('erasing an account', () => {
     expect(again.status).toBe(200);
     expect(again.body).toMatchObject({ erased: true, alreadyErased: true });
     expect(await count(`SELECT count(*) AS n FROM account_erasures WHERE github_user_id = $1`, [74])).toBe(1);
+    expect((await api.ledger()).events.filter((e) => e.kind === 'erasure')).toHaveLength(1);
   });
 
   it('refuses while a bounty assignment or payout is in flight, and changes nothing', async () => {

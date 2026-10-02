@@ -16,6 +16,7 @@ import { applicantBucket, DRAW_SETTINGS, withDefaults } from '../../../packages/
 import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 import type { FundedService } from './funded-service.ts';
+import { loadErased, shownLogin } from './erasure-service.ts';
 
 export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
 
@@ -147,7 +148,12 @@ export interface PublicBounty {
 
 export interface LedgerEvent {
   at: string;
-  kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout';
+  /**
+   * 'erasure' is an account erased at its owner's request. It names nobody:
+   * it is there so that the change in what the ledger shows - that account's
+   * login replaced with "erased account" - is itself on the record.
+   */
+  kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout' | 'erasure';
   /** The bounty this event belongs to, so a page can show one bounty's receipt chain. */
   bountyId: string | null;
   test: boolean;
@@ -215,10 +221,10 @@ export class PublicApi {
     const visibility = cfg.applicant_count_visibility ?? 'bucketed';
     const r = await this.db.query(
       `SELECT b.id, r.owner, r.name, b.issue_number, b.issue_title, b.amount_minor::text AS amount_minor, b.mint, b.currency, b.network, b.status, b.created_at,
-              p.tx_signature, p.updated_at AS paid_at, s.author_login,
+              p.tx_signature, p.updated_at AS paid_at, s.author_login, s.author_github_user_id,
               b.is_test, b.waived_eligibility_rules, b.reserved_for_newcomers, b.applications_open_at, b.applications_close_at,
-              a.github_login AS assigned_login, a.stale_at AS assignment_stale_at,
-              b.funded_by, e.assignment_mode, e.escrow_pubkey, e.deadline_at AS escrow_deadline_at,
+              a.github_login AS assigned_login, a.github_user_id AS assigned_github_user_id, a.stale_at AS assignment_stale_at,
+              b.funded_by, b.funded_by_github_user_id, e.assignment_mode, e.escrow_pubkey, e.deadline_at AS escrow_deadline_at,
               (SELECT count(*) FROM bounty_applications ap
                 WHERE ap.bounty_id = b.id AND ap.status IN ('applied','won','lost'))::int AS applicant_count
          FROM bounties b
@@ -232,17 +238,21 @@ export class PublicApi {
         LIMIT 200`,
       id ? [id] : [],
     );
+    // Accounts erased at their owner's request: their rows stay, their
+    // logins are not shown (erasure-service.ts).
+    const erased = await loadErased(this.db);
+    const show = (login: string | null, id?: string | number | null) => shownLogin(erased, login, id);
     // One query each for the whole list, not one per bounty.
     const ids = r.rows.map((b) => b.id as string);
     const history = new Map<string, BountyHistoryEntry[]>();
     if (ids.length) {
-      const draws = await this.db.query<{ bounty_id: string; created_at: Date; triggered_by: string | null; winner_login: string | null }>(
-        `SELECT bounty_id, created_at, triggered_by, winner_login FROM bounty_draws
+      const draws = await this.db.query<{ bounty_id: string; created_at: Date; triggered_by: string | null; winner_login: string | null; winner_github_user_id: string | null }>(
+        `SELECT bounty_id, created_at, triggered_by, winner_login, winner_github_user_id FROM bounty_draws
           WHERE bounty_id = ANY($1::uuid[]) AND NOT is_simulation`,
         [ids],
       );
-      const unassigns = await this.db.query<{ bounty_id: string; released_at: Date; released_by: string; github_login: string }>(
-        `SELECT bounty_id, released_at, released_by, github_login FROM bounty_assignments
+      const unassigns = await this.db.query<{ bounty_id: string; released_at: Date; released_by: string; github_login: string; github_user_id: string }>(
+        `SELECT bounty_id, released_at, released_by, github_login, github_user_id FROM bounty_assignments
           WHERE bounty_id = ANY($1::uuid[]) AND status = 'released_voluntary' AND released_by IS NOT NULL`,
         [ids],
       );
@@ -253,15 +263,15 @@ export class PublicApi {
       );
       const add = (id: string, e: BountyHistoryEntry) => history.set(id, [...(history.get(id) ?? []), e]);
       for (const d of draws.rows) {
-        add(d.bounty_id, { kind: 'draw', at: new Date(d.created_at).toISOString(), by: d.triggered_by ?? 'automatic', drawn: d.winner_login });
+        add(d.bounty_id, { kind: 'draw', at: new Date(d.created_at).toISOString(), by: show(d.triggered_by) ?? 'automatic', drawn: show(d.winner_login, d.winner_github_user_id) });
       }
       for (const u of unassigns.rows) {
-        add(u.bounty_id, { kind: 'unassign', at: new Date(u.released_at).toISOString(), by: u.released_by, contributor: u.github_login });
+        add(u.bounty_id, { kind: 'unassign', at: new Date(u.released_at).toISOString(), by: show(u.released_by)!, contributor: show(u.github_login, u.github_user_id)! });
       }
       for (const r of reopens.rows) {
         add(r.subject, {
-          kind: 'reopened', at: new Date(r.at).toISOString(), by: r.actor,
-          reason: r.detail.reason ?? 'reopened', prNumber: r.detail.prNumber ?? null, contributor: r.detail.contributor ?? null,
+          kind: 'reopened', at: new Date(r.at).toISOString(), by: show(r.actor)!,
+          reason: r.detail.reason ?? 'reopened', prNumber: r.detail.prNumber ?? null, contributor: show(r.detail.contributor ?? null),
         });
       }
       for (const list of history.values()) list.sort((a, b) => a.at.localeCompare(b.at));
@@ -269,7 +279,8 @@ export class PublicApi {
 
     const profiles = new Map<string, { bountiesFunded: number; unassignedBeforePr: number; disputesRaised: number }>();
     if (this.opts.funded) {
-      for (const login of new Set(r.rows.map((b) => b.funded_by as string | null).filter((x): x is string => Boolean(x)))) {
+      const shownFunders = r.rows.filter((b) => show(b.funded_by, b.funded_by_github_user_id) === b.funded_by);
+      for (const login of new Set(shownFunders.map((b) => b.funded_by as string | null).filter((x): x is string => Boolean(x)))) {
         const p = await this.opts.funded.profile(login);
         profiles.set(login.toLowerCase(), { bountiesFunded: p.bountiesFunded, unassignedBeforePr: p.unassignedBeforePr, disputesRaised: p.disputesRaised });
       }
@@ -287,7 +298,7 @@ export class PublicApi {
       status: b.status,
       postedAt: new Date(b.created_at).toISOString(),
       payout: b.tx_signature
-        ? { txSignature: b.tx_signature, txUrl: explorerTx(b.network, b.tx_signature), paidAt: new Date(b.paid_at).toISOString(), recipientLogin: b.author_login }
+        ? { txSignature: b.tx_signature, txUrl: explorerTx(b.network, b.tx_signature), paidAt: new Date(b.paid_at).toISOString(), recipientLogin: show(b.author_login, b.author_github_user_id)! }
         : null,
       isTest: b.is_test === true,
       reservedForNewcomers: b.reserved_for_newcomers === true,
@@ -295,13 +306,13 @@ export class PublicApi {
       applicationsOpenAt: b.applications_open_at ? new Date(b.applications_open_at).toISOString() : null,
       applicationsCloseAt: b.applications_close_at ? new Date(b.applications_close_at).toISOString() : null,
       applicationState: !b.applications_close_at ? 'none' : new Date(b.applications_close_at) > new Date() ? 'open' : 'closed',
-      assignedTo: b.assigned_login ?? null,
+      assignedTo: show(b.assigned_login ?? null, b.assigned_github_user_id),
       assignmentStaleAt: b.assignment_stale_at ? new Date(b.assignment_stale_at).toISOString() : null,
       history: history.get(b.id) ?? [],
       ...poolVisibility(Number(b.applicant_count ?? 0), visibility, b.applications_close_at),
       funded: b.funded_by && b.escrow_pubkey
         ? {
-            by: b.funded_by as string,
+            by: show(b.funded_by as string, b.funded_by_github_user_id)!,
             mode: b.assignment_mode as 'draw' | 'self_assign',
             escrow: b.escrow_pubkey as string,
             escrowUrl: explorerAccount(b.network, b.escrow_pubkey),
@@ -415,6 +426,19 @@ export class PublicApi {
         detail: `${c.purpose} · ${c.model}`,
         amount: mock ? null : `$${(paid / 1e6).toFixed(6)}`,
         proof: c.pay_tx_signature && !mock ? { label: shortSig(c.pay_tx_signature), url: explorerTx('solana-mainnet', c.pay_tx_signature) } : { label: `quote ${String(c.quote_id).slice(0, 8)}`, url: null },
+      });
+    }
+    // Each erasure is an event of its own, naming nobody, so the change in what
+    // the entries above show is on the record rather than silent.
+    for (const e of (await loadErased(this.db)).erasures) {
+      events.push({
+        at: e.at.toISOString(),
+        kind: 'erasure',
+        bountyId: null,
+        test: false,
+        detail: "An account was erased at its owner's request. Entries are unchanged, except that its GitHub login is now shown as \"erased account\".",
+        amount: null,
+        proof: { label: 'owner request', url: null },
       });
     }
     events.sort((a, b) => b.at.localeCompare(a.at));
