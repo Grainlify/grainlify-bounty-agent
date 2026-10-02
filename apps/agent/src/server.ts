@@ -11,6 +11,7 @@ import type { EscrowService } from './escrow-service.ts';
 import type { FundedService } from './funded-service.ts';
 import { corsHeaders, type PublicApi } from './public.ts';
 import { verifySessionAction } from '../../../packages/gate/src/session-action.ts';
+import { eraseAccount } from './erasure-service.ts';
 
 export function verifyWebhookSignature(secret: string, rawBody: Buffer, header: string | undefined): boolean {
   if (!header?.startsWith('sha256=')) return false;
@@ -226,6 +227,42 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         return r.ok
           ? reply(r.status, { linked: true, wallet: r.wallet, githubLogin: r.githubLogin, replaced: r.replaced, unchanged: r.unchanged })
           : reply(r.status, { error: r.error, detail: r.detail });
+      }
+
+      // Erasing a person's account at their request (erasure-service.ts).
+      // Called by Grainlify-Backend's erasure executor, never by a browser, so
+      // no CORS. What authorises it is the countersignature under the erasure
+      // domain, which only that executor produces.
+      //
+      // No nonce is spent. Erasure is idempotent, so a replay inside the
+      // ten-minute window changes nothing - and spending one would write a
+      // link_nonces row naming the person straight after erasing theirs.
+      if (req.method === 'POST' && url.pathname === '/account/erase') {
+        if (!d.linkCountersignKey) return send(503, { error: 'erasure_not_configured' });
+        let body: Record<string, unknown>;
+        try {
+          body = JSON.parse((await readRaw(req, 16 * 1024)).toString('utf8')) as Record<string, unknown>;
+        } catch {
+          note = ' erase=refused reason=malformed';
+          return send(400, { error: 'malformed' });
+        }
+        const v = verifySessionAction(
+          { message: body?.message, countersignature: body?.countersignature },
+          d.linkCountersignKey,
+          'erasure',
+          (d.now ?? (() => new Date()))(),
+        );
+        if (!v.ok) {
+          note = ` erase=refused reason=${v.code}`;
+          return send(400, { error: v.code, detail: v.reason });
+        }
+        const r = await eraseAccount(d.db, v.fields.githubUserId);
+        if (!r.ok) {
+          note = ` erase=held github=${v.fields.githubUserId}`;
+          return send(409, { error: 'in_flight', detail: r.inFlight.join('; ') });
+        }
+        note = ` erase=${r.alreadyErased ? 'already' : 'done'} github=${v.fields.githubUserId}`;
+        return send(200, { erased: true, alreadyErased: r.alreadyErased, removed: r.removed });
       }
 
       // One real inference call, to verify the deployed service can buy
