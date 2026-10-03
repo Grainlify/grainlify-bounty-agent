@@ -1,0 +1,258 @@
+// The public side of GrainHack payouts: the append-only grainhack_ledger
+// (pool deposits and payouts), event 1's testnet history, and the per-event
+// public view. Nothing here exposes who is held for KYC: a held winner and a
+// winner with no wallet yet look the same publicly ("waiting").
+
+import { Connection, PublicKey } from '@solana/web3.js';
+import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
+import type pg from 'pg';
+import { explorerTx } from '../config.ts';
+import type { GrainhackConfig } from './config.ts';
+
+// --- pool deposits --------------------------------------------------------
+
+export interface TokenBalanceChange {
+  account: string;
+  mint: string;
+  owner: string | null;
+  pre: bigint;
+  post: bigint;
+}
+
+export interface DepositFacts {
+  err: unknown;
+  blockTime: number | null;
+  changes: TokenBalanceChange[];
+}
+
+/** What a deposit check needs from the chain. Finalized only: a ledger row must not be rolled back under it. */
+export interface DepositChain {
+  deposit(signature: string): Promise<DepositFacts | null>;
+}
+
+export class SolanaDepositChain implements DepositChain {
+  private readonly conn: Connection;
+  constructor(rpcUrl: string) {
+    this.conn = new Connection(rpcUrl, 'finalized');
+  }
+  async deposit(signature: string): Promise<DepositFacts | null> {
+    const tx = await this.conn.getParsedTransaction(signature, { commitment: 'finalized', maxSupportedTransactionVersion: 0 });
+    if (!tx?.meta) return null;
+    const keys = tx.transaction.message.accountKeys.map((k) => k.pubkey.toBase58());
+    const by = new Map<number, TokenBalanceChange>();
+    for (const [side, list] of [['pre', tx.meta.preTokenBalances ?? []], ['post', tx.meta.postTokenBalances ?? []]] as const) {
+      for (const b of list) {
+        const c = by.get(b.accountIndex) ?? { account: keys[b.accountIndex] ?? '', mint: b.mint, owner: b.owner ?? null, pre: 0n, post: 0n };
+        c[side] = BigInt(b.uiTokenAmount.amount);
+        by.set(b.accountIndex, c);
+      }
+    }
+    return { err: tx.meta.err, blockTime: tx.blockTime ?? null, changes: [...by.values()] };
+  }
+}
+
+export type FundingResult =
+  | { ok: true; recorded: boolean; amountMinor: string; at: string; account: string }
+  | { ok: false; error: string };
+
+/**
+ * Records a deposit to the GrainHack float as `grainhack_pool_funded`, after
+ * reading the transaction from the chain: it succeeded, it moved the
+ * configured mint, the account it credited is the float's associated token
+ * account, and it credited exactly the amount the operator says it did.
+ */
+export async function recordPoolFunding(
+  d: { db: pg.Pool; cfg: GrainhackConfig; chain: DepositChain },
+  a: { hackathonId: string; txSignature: string; expectedAmountMinor: bigint; currency?: string; actor: string; note?: string },
+): Promise<FundingResult> {
+  if (!/^[0-9a-f-]{36}$/.test(a.hackathonId)) return { ok: false, error: 'hackathon id must be a uuid' };
+  if (!a.actor.trim()) return { ok: false, error: '--actor is required: the ledger records who recorded the deposit' };
+  const currency = a.currency ?? 'USDC';
+  const m = d.cfg.mints[currency];
+  if (!m) return { ok: false, error: `no GrainHack mint configured for ${currency}` };
+  if (!d.cfg.floatAddress) return { ok: false, error: 'GRAINHACK_FLOAT_ADDRESS is not set: cannot tell which account a deposit must reach' };
+  const facts = await d.chain.deposit(a.txSignature);
+  if (!facts) return { ok: false, error: `transaction ${a.txSignature} not found at finalized commitment on ${d.cfg.network}` };
+  if (facts.err) return { ok: false, error: `transaction failed on chain: ${JSON.stringify(facts.err)}` };
+  const mint = new PublicKey(m.mint);
+  const float = new PublicKey(d.cfg.floatAddress);
+  const atas = [TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID].map((p) => getAssociatedTokenAddressSync(mint, float, false, p).toBase58());
+  const credit = facts.changes.find((c) => atas.includes(c.account) && c.mint === m.mint);
+  if (!credit) return { ok: false, error: `the transaction did not touch the GrainHack float's ${currency} account (${atas[0]})` };
+  if (credit.owner && credit.owner !== d.cfg.floatAddress) return { ok: false, error: `that account is owned by ${credit.owner}, not the float` };
+  const delta = credit.post - credit.pre;
+  if (delta <= 0n) return { ok: false, error: 'the transaction did not credit the float' };
+  if (delta !== a.expectedAmountMinor) return { ok: false, error: `the transaction credited ${delta} minor units, not the ${a.expectedAmountMinor} you said` };
+  const at = facts.blockTime ? new Date(facts.blockTime * 1000).toISOString() : new Date().toISOString();
+  const name = (await d.db.query<{ hackathon_name: string }>(`SELECT hackathon_name FROM grainhack_statements WHERE hackathon_id = $1 ORDER BY imported_at DESC LIMIT 1`, [a.hackathonId])).rows[0]?.hackathon_name ?? null;
+  const r = await d.db.query(
+    `INSERT INTO grainhack_ledger (kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor, tx_signature, recorded_by, at, note)
+     VALUES ('grainhack_pool_funded', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (network, tx_signature, kind) DO NOTHING`,
+    [a.hackathonId, name, d.cfg.network, currency, m.decimals, delta.toString(), a.txSignature, a.actor, at, a.note ?? null],
+  );
+  return { ok: true, recorded: (r.rowCount ?? 0) > 0, amountMinor: delta.toString(), at, account: credit.account };
+}
+
+// --- event 1 history ---------------------------------------------------------
+
+/**
+ * Event 1's two GrainHack payouts, made through KeeperHub on Base Sepolia on
+ * 19 September 2026 (IST) before this path existed. Test USDC with no value.
+ * From the archived KeeperHub legs; recorded as history, never as payouts
+ * made by the grainhack-signer.
+ */
+export const EVENT1_KEEPERHUB_HISTORY = [
+  { login: 'Baskarayelu', amountMinor: '4000000', tx: '0xf54c1f583103af5342865909ea0c5df35d464aee340e16da82b621adebaae7b6', at: '2026-09-18T21:30:00Z' },
+  { login: 'arisu6804', amountMinor: '4000000', tx: '0x0b4c2ba2f74b60045145c01c7260da0393d79676350456ebc319028b1ac9221c', at: '2026-09-18T22:25:00Z' },
+] as const;
+
+export const EVENT1_HISTORY_NOTE = 'Testnet history: paid through KeeperHub on Base Sepolia before the Solana payout path existed. Test USDC with no value; pro-rata, not the published figures.';
+
+/** Idempotent: a second run records nothing. Returns how many rows it added. */
+export async function recordEvent1History(db: pg.Pool, a: { hackathonId: string; hackathonName?: string; actor: string }): Promise<number> {
+  if (!/^[0-9a-f-]{36}$/.test(a.hackathonId)) throw new Error('hackathon id must be a uuid');
+  if (!a.actor.trim()) throw new Error('--actor is required');
+  let added = 0;
+  for (const h of EVENT1_KEEPERHUB_HISTORY) {
+    const r = await db.query(
+      `INSERT INTO grainhack_ledger (kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor, tx_signature, login, is_history, note, recorded_by, at)
+       VALUES ('grainhack_payout', $1, $2, 'base-sepolia', 'USDC', 6, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (network, tx_signature, kind) DO NOTHING`,
+      [a.hackathonId, a.hackathonName ?? null, h.amountMinor, h.tx, h.login, EVENT1_HISTORY_NOTE, a.actor, h.at],
+    );
+    added += r.rowCount ?? 0;
+  }
+  return added;
+}
+
+// --- public views ------------------------------------------------------------
+
+export type PublicWinnerStatus = 'waiting' | 'sending' | 'paid';
+
+/** No KYC status in public: held, no wallet yet, and awaiting approval are all "waiting". */
+export function publicStatus(s: string): PublicWinnerStatus {
+  if (s === 'paid') return 'paid';
+  if (s === 'submitted' || s === 'unknown') return 'sending';
+  return 'waiting';
+}
+
+const fmt = (minor: string, decimals: number, currency: string, network: string) =>
+  `${(Number(minor) / 10 ** decimals).toFixed(2)} ${network === 'solana-mainnet' ? currency : `test ${currency}`}`;
+
+export interface PublicGrainhackWinner {
+  login: string;
+  amountMinor: string;
+  decimals: number;
+  currency: string;
+  network: string;
+  amount: string;
+  status: PublicWinnerStatus;
+  txSignature: string | null;
+  txUrl: string | null;
+  paidAt: string | null;
+  /** True on network !== solana-mainnet: test tokens with no value. */
+  test: boolean;
+  /** True on rows carried over from before this path (event 1 on Base Sepolia). */
+  history: boolean;
+  note: string | null;
+}
+
+interface LedgerRow {
+  kind: 'grainhack_pool_funded' | 'grainhack_payout';
+  hackathon_id: string;
+  hackathon_name: string | null;
+  network: string;
+  currency: string;
+  decimals: number;
+  amount_minor: string;
+  tx_signature: string;
+  login: string | null;
+  payout_id: string | null;
+  is_history: boolean;
+  note: string | null;
+  at: Date;
+}
+const LEDGER_COLS = `kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor::text AS amount_minor, tx_signature, login, payout_id, is_history, note, at`;
+
+export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, decimalsFor: (currency: string) => number = () => 6) {
+  if (!/^[0-9a-f-]{36}$/.test(hackathonId)) return null;
+  const st = (await db.query<{ hackathon_name: string; pool: string; currency: string; network: string; pool_minor: string; issued_at: Date }>(
+    `SELECT hackathon_name, pool, currency, network, pool_minor::text AS pool_minor, issued_at FROM grainhack_statements
+      WHERE hackathon_id = $1 AND pool = 'contributor' AND superseded_by IS NULL`,
+    [hackathonId],
+  )).rows[0];
+  const rows = (await db.query<{ login: string; amount_minor: string; currency: string; network: string; status: string; tx_signature: string | null; paid_at: Date | null }>(
+    `SELECT login, amount_minor::text AS amount_minor, currency, network, status, tx_signature, paid_at FROM grainhack_payouts
+      WHERE hackathon_id = $1 AND pool = 'contributor' AND status <> 'removed' ORDER BY lower(login)`,
+    [hackathonId],
+  )).rows;
+  const ledger = (await db.query<LedgerRow>(`SELECT ${LEDGER_COLS} FROM grainhack_ledger WHERE hackathon_id = $1 ORDER BY at`, [hackathonId])).rows;
+  if (!st && !rows.length && !ledger.length) return null;
+
+  const winners: PublicGrainhackWinner[] = rows.map((r) => {
+    const decimals = decimalsFor(r.currency);
+    const status = publicStatus(r.status);
+    const tx = status === 'paid' ? r.tx_signature : null;
+    return {
+      login: r.login, amountMinor: r.amount_minor, decimals, currency: r.currency, network: r.network, amount: fmt(r.amount_minor, decimals, r.currency, r.network), status,
+      txSignature: tx, txUrl: tx ? explorerTx(r.network, tx) : null, paidAt: status === 'paid' && r.paid_at ? new Date(r.paid_at).toISOString() : null,
+      test: r.network !== 'solana-mainnet', history: false, note: null,
+    };
+  });
+  const history: PublicGrainhackWinner[] = ledger
+    .filter((l) => l.kind === 'grainhack_payout' && l.is_history)
+    .map((l) => ({
+      login: l.login ?? '', amountMinor: l.amount_minor, decimals: l.decimals, currency: l.currency, network: l.network, amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
+      status: 'paid', txSignature: l.tx_signature, txUrl: explorerTx(l.network, l.tx_signature), paidAt: new Date(l.at).toISOString(),
+      test: l.network !== 'solana-mainnet', history: true, note: l.note,
+    }));
+  const funding = ledger
+    .filter((l) => l.kind === 'grainhack_pool_funded')
+    .map((l) => ({ amountMinor: l.amount_minor, decimals: l.decimals, currency: l.currency, network: l.network, amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
+      txSignature: l.tx_signature, txUrl: explorerTx(l.network, l.tx_signature), at: new Date(l.at).toISOString(), test: l.network !== 'solana-mainnet' }));
+  const sum = (list: { amountMinor: string }[]) => list.reduce((a, x) => a + BigInt(x.amountMinor), 0n).toString();
+  const network = st?.network ?? rows[0]?.network ?? ledger[0]?.network ?? null;
+  return {
+    hackathonId,
+    hackathonName: st?.hackathon_name ?? ledger.find((l) => l.hackathon_name)?.hackathon_name ?? null,
+    pool: 'contributor',
+    network,
+    test: network !== 'solana-mainnet',
+    currency: st?.currency ?? rows[0]?.currency ?? ledger[0]?.currency ?? null,
+    statement: st ? { issuedAt: new Date(st.issued_at).toISOString(), poolMinor: st.pool_minor } : null,
+    winners,
+    history,
+    funding,
+    totals: {
+      poolMinor: st?.pool_minor ?? null,
+      paidMinor: sum(winners.filter((w) => w.status === 'paid')),
+      waitingMinor: sum(winners.filter((w) => w.status !== 'paid')),
+      paidCount: winners.filter((w) => w.status === 'paid').length,
+      waitingCount: winners.filter((w) => w.status !== 'paid').length,
+      fundedMinor: sum(funding),
+      historyPaidMinor: sum(history),
+    },
+  };
+}
+
+/** Every GrainHack ledger row, newest first, for the public ledger. */
+export async function grainhackLedgerRows(db: pg.Pool, limit = 300): Promise<LedgerRow[]> {
+  return (await db.query<LedgerRow>(`SELECT ${LEDGER_COLS} FROM grainhack_ledger ORDER BY at DESC, id DESC LIMIT $1`, [limit])).rows;
+}
+
+export function grainhackLedgerEvent(l: LedgerRow) {
+  const name = l.hackathon_name ?? 'event';
+  const detail = l.kind === 'grainhack_pool_funded'
+    ? `GrainHack ${name} pool funded`
+    : `GrainHack ${name} → ${l.login ?? 'winner'}${l.is_history ? ' (testnet history, KeeperHub on Base Sepolia)' : ''}`;
+  return {
+    at: new Date(l.at).toISOString(),
+    kind: l.kind,
+    bountyId: null,
+    hackathonId: l.hackathon_id,
+    test: l.network !== 'solana-mainnet',
+    history: l.is_history,
+    detail,
+    amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
+    proof: { label: `${l.tx_signature.slice(0, 5)}…${l.tx_signature.slice(-4)}`, url: explorerTx(l.network, l.tx_signature) },
+  };
+}

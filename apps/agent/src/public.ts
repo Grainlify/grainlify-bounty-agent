@@ -17,6 +17,7 @@ import { PRIOR_COMPLETION_CAP } from '../../../packages/gate/src/draw.ts';
 import { explorerTx, type AgentConfig } from './config.ts';
 import type { FundedService } from './funded-service.ts';
 import { loadErased, shownLogin } from './erasure-service.ts';
+import { grainhackLedgerEvent, grainhackLedgerRows, publicGrainhackEvent } from './grainhack/ledger.ts';
 
 export const DEFAULT_PUBLIC_ORIGINS = ['https://grainlify.com', 'https://www.grainlify.com'];
 
@@ -153,9 +154,13 @@ export interface LedgerEvent {
    * it is there so that the change in what the ledger shows - that account's
    * login replaced with "erased account" - is itself on the record.
    */
-  kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout' | 'erasure';
+  kind: 'bounty_posted' | 'inference' | 'gate_passed' | 'gate_refused' | 'payout' | 'erasure' | 'grainhack_pool_funded' | 'grainhack_payout';
   /** The bounty this event belongs to, so a page can show one bounty's receipt chain. */
   bountyId: string | null;
+  /** GrainHack rows: the event they belong to. Absent on bounty rows. */
+  hackathonId?: string;
+  /** GrainHack rows carried over from before the Solana path (event 1 on Base Sepolia). */
+  history?: boolean;
   test: boolean;
   detail: string;
   amount: string | null;
@@ -187,7 +192,7 @@ export class PublicApi {
   constructor(
     private readonly db: pg.Pool,
     private readonly cfg: AgentConfig,
-    private readonly opts: { escrowMints?: Record<string, { mint: string; decimals: number }>; funded?: FundedService } = {},
+    private readonly opts: { escrowMints?: Record<string, { mint: string; decimals: number }>; funded?: FundedService; grainhackMints?: Record<string, { mint: string; decimals: number }> } = {},
   ) {}
 
   status(): PublicStatus {
@@ -323,6 +328,11 @@ export class PublicApi {
     }));
   }
 
+  /** One GrainHack event's payouts, publicly: per winner login, amount, status and transaction. No KYC status. */
+  async grainhack(hackathonId: string) {
+    return publicGrainhackEvent(this.db, hackathonId, (currency) => this.opts.grainhackMints?.[currency]?.decimals ?? 6);
+  }
+
   /**
    * The rules, published. Every setting with its live value, its coded
    * default, and whether a person has overridden it.
@@ -441,6 +451,9 @@ export class PublicApi {
         proof: { label: 'owner request', url: null },
       });
     }
+    // GrainHack: pool deposits and payouts, from their append-only ledger.
+    const grainhack = await grainhackLedgerRows(this.db).catch(() => []);
+    for (const g of grainhack) events.push(grainhackLedgerEvent(g));
     events.sort((a, b) => b.at.localeCompare(a.at));
 
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();
@@ -456,6 +469,9 @@ export class PublicApi {
         inferenceSpendMicro: totals ? totals.lifetimeMicro : null,
         inferenceCeilingMicro: 5_000_000,
         feesInMicro: null as number | null, // not tracked until GRAIN launches
+        grainhackPaidMainnet: grainhack.filter((g) => g.kind === 'grainhack_payout' && g.network === 'solana-mainnet').length,
+        grainhackPaidTest: grainhack.filter((g) => g.kind === 'grainhack_payout' && g.network !== 'solana-mainnet').length,
+        grainhackPoolsFunded: grainhack.filter((g) => g.kind === 'grainhack_pool_funded').length,
       },
       budget: PHASES.map((p) => ({ phase: p, allocationMicro: PHASE_ALLOCATION_MICRO[p], spentMicro: totals ? totals.byPhase[p] : 0 })),
       events: events.slice(0, 300),
