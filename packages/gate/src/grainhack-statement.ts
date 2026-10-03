@@ -157,8 +157,11 @@ function verifyResultsSignature(statementJson: string, sigB64: string, pubB64: s
 }
 
 /** Is `s` a valid base64 Ed25519 public key? For config checks at boot. */
+// Canonical padded base64 of 32 bytes only: 43 characters and '='. Node's
+// base64 decoder is lenient, and a 43-character base58 Solana address decodes
+// to 32 bytes too, so length alone would accept the wrong kind of key.
 export function isResultsPubkey(s: string | undefined): boolean {
-  return typeof s === 'string' && Buffer.from(s, 'base64').length === 32;
+  return typeof s === 'string' && /^[A-Za-z0-9+/]{43}=$/.test(s) && Buffer.from(s, 'base64').toString('base64') === s;
 }
 
 export function lineFor(s: ResultsStatement, githubUserId: number): StatementLine | undefined {

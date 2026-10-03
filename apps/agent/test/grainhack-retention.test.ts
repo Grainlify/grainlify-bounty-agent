@@ -338,5 +338,5 @@ describe.skipIf(!dbUrl)('GrainHack retention', () => {
       await admin.query(`DROP DATABASE IF EXISTS test_grainhack_retention_empty WITH (FORCE)`);
       await admin.end();
     }
-  });
+  }, 30_000); // creates and drops a database: slow on a loaded machine
 });

@@ -4,7 +4,7 @@ import { approvalMessage, signApproval, verifyApproval, type PayoutTerms } from 
 import {
   checkGrainhackTermsShape, GRAINHACK_APPROVAL_DOMAIN, signGrainhackApproval, verifyGrainhackApproval, type GrainhackTerms,
 } from '../src/grainhack-approval.ts';
-import { canonicalJson, statementSha256, verifyStatement } from '../src/grainhack-statement.ts';
+import { canonicalJson, isResultsPubkey, statementSha256, verifyStatement } from '../src/grainhack-statement.ts';
 import { resultsKey, signed, statement } from './grainhack-support.ts';
 
 // Our own golden vector, until the backend publishes theirs for a cross-check.
@@ -113,5 +113,18 @@ describe('approval domains', () => {
     expect(checkGrainhackTermsShape({ ...gh, extra: 1 })).toMatch(/exactly/);
     expect(checkGrainhackTermsShape({ ...gh, github_user_id: '101' })).toMatch(/github_user_id/);
     expect(checkGrainhackTermsShape({ ...gh, amount_minor: '0' })).toMatch(/amount_minor/);
+  });
+});
+
+describe('the results public key', () => {
+  it('accepts only canonical padded base64 of 32 bytes', () => {
+    expect(isResultsPubkey('A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=')).toBe(true);
+    // A 43-character base58 Solana address decodes as base64 to 32 bytes;
+    // it is still the wrong kind of key.
+    const base58 = '4SmFidGCcWS2XaiPybQ5CQHDwpNtQvdsPCnfdjMhqHks'.slice(0, 43);
+    expect(Buffer.from(base58, 'base64').length).toBe(32);
+    expect(isResultsPubkey(base58)).toBe(false);
+    expect(isResultsPubkey('A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg')).toBe(false);
+    expect(isResultsPubkey(undefined)).toBe(false);
   });
 });
