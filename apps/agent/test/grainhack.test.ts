@@ -24,7 +24,7 @@ import { approveEvent } from '../src/grainhack/approve-event.ts';
 import { BackendStatementSource, deliverReports, discoverStatements, enqueueReport } from '../src/grainhack/backend.ts';
 import { grainhackConfigFromEnv, type GrainhackConfig } from '../src/grainhack/config.ts';
 import { parseAmount } from '../src/grainhack/cli.ts';
-import { EVENT1_HACKATHON_ID, EVENT1_HACKATHON_NAME, EVENT1_KEEPERHUB_HISTORY, publicStatus, recordEvent1History, recordPoolFunding, type DepositFacts } from '../src/grainhack/ledger.ts';
+import { EVENT1_HACKATHON_ID, EVENT1_HACKATHON_NAME, EVENT1_KEEPERHUB_HISTORY, formatMinor, publicStatus, recordEvent1History, recordPoolFunding, type DepositFacts } from '../src/grainhack/ledger.ts';
 import { GrainhackService } from '../src/grainhack/service.ts';
 import { GrainhackSignerClient } from '../src/grainhack/signer-client.ts';
 import { PublicApi } from '../src/public.ts';
@@ -432,6 +432,17 @@ describe.skipIf(!dbUrl)('GrainHack payouts on the agent', () => {
     const bad = await discoverStatements({ db, source, service }, [HACK]);
     expect(bad).toMatchObject({ imported: [], errors: [{ hackathonId: HACK, error: expect.stringMatching(/signature does not verify/) }] });
     expect((await service.currentStatement(HACK))?.statement_id).toBe(idOf(cleared));
+  });
+});
+
+describe('GrainHack amounts', () => {
+  it('shows every digit the token has, never rounded', () => {
+    expect(formatMinor('3333333', 6)).toBe('3.333333');
+    expect(formatMinor('4000000', 6)).toBe('4.00');
+    expect(formatMinor('2500000', 6)).toBe('2.50');
+    expect(formatMinor('1', 6)).toBe('0.000001');
+    expect(formatMinor('9007199254740993000001', 6)).toBe('9007199254740993.000001');
+    expect(formatMinor('5', 0)).toBe('5');
   });
 });
 

@@ -146,8 +146,16 @@ export function publicStatus(s: string): PublicWinnerStatus {
   return 'waiting';
 }
 
+/** Every digit the token has, never rounded: 3.333333, not 3.33. At least two decimals. */
+export function formatMinor(minor: string, decimals: number): string {
+  const digits = BigInt(minor).toString().padStart(decimals + 1, '0');
+  const whole = digits.slice(0, digits.length - decimals) || '0';
+  const frac = digits.slice(digits.length - decimals).replace(/0+$/, '').padEnd(Math.min(2, decimals), '0');
+  return frac ? `${whole}.${frac}` : whole;
+}
+
 const fmt = (minor: string, decimals: number, currency: string, network: string) =>
-  `${(Number(minor) / 10 ** decimals).toFixed(2)} ${network === 'solana-mainnet' ? currency : `test ${currency}`}`;
+  `${formatMinor(minor, decimals)} ${network === 'solana-mainnet' ? currency : `test ${currency}`}`;
 
 export interface PublicGrainhackWinner {
   login: string;
