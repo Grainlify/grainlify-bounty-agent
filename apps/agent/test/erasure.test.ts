@@ -240,6 +240,57 @@ describe.skipIf(!dbUrl)('erasing an account', () => {
     expect(await count(`SELECT count(*) AS n FROM payouts WHERE recipient_github_user_id = $1 AND status = 'approved' AND recipient = 'wallet78'`, [78])).toBe(1);
   });
 
+  // GrainHack: a payout waiting for its approval holds the erasure like a
+  // bounty payout; past the limit it keeps the wallet the payout is frozen
+  // to; "link a wallet" reports go, payment reports stay; and the public
+  // GrainHack view and ledger rows show the account as erased.
+  it('GrainHack: in-flight payouts hold, records stay, the public view masks the login', async () => {
+    await contributor(80, 'hacker');
+    const HACK = '0d6e8a3c-7b1f-4c5e-9a2d-4e5f6a7b8c9d';
+    const sid = randomUUID();
+    await db.query(`ALTER TABLE grainhack_ledger DISABLE TRIGGER grainhack_ledger_append_only`);
+    await db.query(`ALTER TABLE grainhack_statements DISABLE TRIGGER grainhack_statements_immutable`);
+    await db.query(`TRUNCATE grainhack_ledger, grainhack_reports, grainhack_payouts, grainhack_statements`);
+    await db.query(`ALTER TABLE grainhack_ledger ENABLE TRIGGER grainhack_ledger_append_only`);
+    await db.query(`ALTER TABLE grainhack_statements ENABLE TRIGGER grainhack_statements_immutable`);
+    await db.query(
+      `INSERT INTO grainhack_statements (statement_id, hackathon_id, hackathon_name, pool, computation_id, currency, network, pool_minor, statement_json, signature, statement_sha256, issued_at, imported_by)
+       VALUES ($1,$2,'GrainHack Test','contributor',$3,'USDC','solana-devnet',4000000,'{}','sig',$4, now(), 't')`,
+      [sid, HACK, randomUUID(), randomBytes(32).toString('hex')],
+    );
+    const payout = randomUUID();
+    await db.query(
+      `INSERT INTO grainhack_payouts (id, hackathon_id, pool, github_user_id, login, statement_id, amount_minor, currency, mint, network, recipient, status)
+       VALUES ($1,$2,'contributor',80,'hacker',$3,4000000,'USDC','mint','solana-devnet','wallet80','awaiting_approval')`,
+      [payout, HACK, sid],
+    );
+    await db.query(`INSERT INTO grainhack_reports (kind, github_user_id, payload, dedupe_key) VALUES ('grainhack_link_wallet', 80, '{"login":"hacker"}', 'lw-80'), ('grainhack_paid', 80, '{"login":"hacker"}', 'paid-80')`);
+
+    expect(await eraseAccount(db, 80)).toMatchObject({ ok: false, inFlight: ['a GrainHack payout not yet confirmed'] });
+    const r = await eraseAccount(db, 80, { retainInFlight: true });
+    expect(r).toMatchObject({ ok: true, retainedInFlight: ['a GrainHack payout not yet confirmed'] });
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1 AND address = 'wallet80'`, [80])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM grainhack_payouts WHERE github_user_id = $1 AND status = 'awaiting_approval'`, [80])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM grainhack_reports WHERE github_user_id = $1`, [80])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM grainhack_reports WHERE dedupe_key = 'paid-80'`, [])).toBe(1);
+
+    // Paid: the ledger row is kept as written, and shown without the login.
+    await db.query(`UPDATE grainhack_payouts SET status = 'paid', tx_signature = 'TxPaid80', paid_at = now() WHERE id = $1`, [payout]);
+    await db.query(
+      `INSERT INTO grainhack_ledger (kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor, tx_signature, login, github_user_id, payout_id, recorded_by, at)
+       VALUES ('grainhack_payout', $1, 'GrainHack Test', 'solana-devnet', 'USDC', 6, 4000000, 'TxPaid80', 'hacker', 80, $2, 't', now())`,
+      [HACK, payout],
+    );
+    const view = await api.grainhack(HACK);
+    expect(view?.winners.map((w) => w.login)).toEqual([ERASED_LOGIN]);
+    const gh = (await api.ledger()).events.filter((e) => e.kind === 'grainhack_payout');
+    expect(gh.map((e) => e.detail)).toEqual([`GrainHack GrainHack Test → ${ERASED_LOGIN}`]);
+    expect(await count(`SELECT count(*) AS n FROM grainhack_ledger WHERE login = 'hacker'`, [])).toBe(1);
+    // Nothing in flight any more: the rest goes.
+    expect(await finishRetainedErasures(db)).toEqual([80]);
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [80])).toBe(0);
+  });
+
   it('refuses an erasure action it does not know', async () => {
     await contributor(79, 'ada');
     const r = await post(erasureBody(79, 'ada', SESSION_ERASURE_DOMAIN, 'erase_everything'));

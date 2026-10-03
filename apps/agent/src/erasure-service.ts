@@ -12,7 +12,9 @@
 // pool is replaced, so the draw can still be re-run and checked.
 //
 // What stays: payouts, submissions, reviews, draws and assignments - the
-// public ledger's rows. The ledger is a record of money paid and of public
+// public ledger's rows - and GrainHack statements, payout rows and ledger
+// rows, which are payout records (the login inside a signed statement cannot
+// change; Grainlify erases its own copy five years after the payment). The ledger is a record of money paid and of public
 // decisions, and it is never edited silently. Instead account_erasures records
 // the erasure; the public API shows "erased account" wherever the login would
 // have appeared, and lists the erasure as a ledger event of its own.
@@ -75,13 +77,22 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number, opts: Eras
                   WHERE b.funded_by_github_user_id = $1 AND e.state IN ('funding','funded','assigned')) AS n`)) {
       inFlight.push('a bounty you funded whose escrow has not settled');
     }
+    // A GrainHack payout with its recipient frozen from the wallet link, or
+    // already handed to the grainhack-signer and not yet confirmed.
+    const grainhackInFlight = await q(`SELECT EXISTS (SELECT 1 FROM grainhack_payouts
+                  WHERE github_user_id = $1 AND status IN ('awaiting_approval','submitted','unknown')) AS n`);
+    if (grainhackInFlight) {
+      inFlight.push('a GrainHack payout not yet confirmed');
+    }
     if (inFlight.length && !opts.retainInFlight) {
       await client.query('ROLLBACK');
       return { ok: false, inFlight };
     }
     // An active assignment is paid to the linked wallet when its pull request
     // merges, so the link stays while it is in flight.
-    const keepWallet = opts.retainInFlight === true && assigned;
+    // So is a GrainHack payout's: approving it checks the frozen recipient
+    // is still the live link.
+    const keepWallet = opts.retainInFlight === true && (assigned || grainhackInFlight);
 
     const prior = await client.query(`SELECT 1 FROM account_erasures WHERE github_user_id = $1`, [githubUserId]);
 
@@ -106,6 +117,10 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number, opts: Eras
     await run('bounty_applications', `DELETE FROM bounty_applications WHERE github_user_id = $1`);
     await run('contributor_snapshots', `DELETE FROM contributor_snapshots WHERE github_user_id = $1`);
     await run('bounty_events', `DELETE FROM bounty_events WHERE github_user_id = $1`);
+    // Undelivered "link a wallet" reports name the person and serve nobody
+    // now. A payment report stays: it is how Grainlify learns a payout was
+    // made, and the payout record is kept.
+    await run('grainhack_reports', `DELETE FROM grainhack_reports WHERE github_user_id = $1 AND kind = 'grainhack_link_wallet'`);
     // The wallet link references the contributor row, so it stays with it.
     if (!keepWallet) await run('contributors', `DELETE FROM contributors WHERE github_user_id = $1`);
     // The pool is kept so a draw stays replayable; only the name inside it goes.
