@@ -256,13 +256,21 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           note = ` erase=refused reason=${v.code}`;
           return send(400, { error: v.code, detail: v.reason });
         }
-        const r = await eraseAccount(d.db, v.fields.githubUserId);
+        // Two actions, both signed: a plain erase, refused while money is in
+        // flight, and the one Grainlify sends once its 30-day limit is
+        // reached, which goes ahead and keeps what that money needs.
+        const action = v.fields.action;
+        if (action !== 'erase' && action !== 'erase_retaining_in_flight') {
+          note = ` erase=refused reason=unknown_action`;
+          return send(400, { error: 'unknown_action', detail: `no erasure action "${action}"` });
+        }
+        const r = await eraseAccount(d.db, v.fields.githubUserId, { retainInFlight: action === 'erase_retaining_in_flight' });
         if (!r.ok) {
           note = ` erase=held github=${v.fields.githubUserId}`;
           return send(409, { error: 'in_flight', detail: r.inFlight.join('; ') });
         }
-        note = ` erase=${r.alreadyErased ? 'already' : 'done'} github=${v.fields.githubUserId}`;
-        return send(200, { erased: true, alreadyErased: r.alreadyErased, removed: r.removed });
+        note = ` erase=${r.alreadyErased ? 'already' : 'done'}${r.retainedInFlight.length ? ' retained' : ''} github=${v.fields.githubUserId}`;
+        return send(200, { erased: true, alreadyErased: r.alreadyErased, removed: r.removed, retainedInFlight: r.retainedInFlight });
       }
 
       // One real inference call, to verify the deployed service can buy

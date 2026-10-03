@@ -10,7 +10,7 @@ import { freshDatabase } from '../../../packages/db/src/testing.ts';
 import { SESSION_APPLY_DOMAIN, SESSION_ERASURE_DOMAIN } from '../../../packages/gate/src/session-action.ts';
 import { grainlifyKey } from '../../../packages/gate/test/session-support.ts';
 import { p2Config } from '../src/config.ts';
-import { ERASED_LOGIN, eraseAccount } from '../src/erasure-service.ts';
+import { ERASED_LOGIN, eraseAccount, finishRetainedErasures } from '../src/erasure-service.ts';
 import { PublicApi } from '../src/public.ts';
 import { createAgentServer } from '../src/server.ts';
 import { BountyService } from '../src/service.ts';
@@ -29,11 +29,11 @@ describe.skipIf(!dbUrl)('erasing an account', () => {
   const iso = (d: Date) => d.toISOString().replace(/\.\d{3}Z$/, 'Z');
 
   // The exact text Grainlify-Backend's AgentErasureMessage signs.
-  const erasureBody = (id: number, login: string, domain = SESSION_ERASURE_DOMAIN) => {
+  const erasureBody = (id: number, login: string, domain = SESSION_ERASURE_DOMAIN, action = 'erase') => {
     const at = new Date(now().getTime() - 60_000);
     const message = [
       'Grainlify: erase account',
-      'Action: erase',
+      `Action: ${action}`,
       `GitHub: ${login} (id ${id})`,
       'Subject: ',
       `Nonce: ${randomBytes(16).toString('hex')}`,
@@ -190,5 +190,61 @@ describe.skipIf(!dbUrl)('erasing an account', () => {
     const unsigned = await post({ ...erasureBody(76, 'ada'), countersignature: Buffer.alloc(64).toString('base64') });
     expect(unsigned.status).toBe(400);
     expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [76])).toBe(1);
+  });
+
+  // Grainlify waits 30 days at most for money in flight, then sends this
+  // action: the erasure goes ahead and keeps only what that money needs.
+  it('past Grainlify\'s 30-day limit, erases anyway and keeps what the assignment still needs', async () => {
+    const b = await contributor(77, 'late');
+    await db.query(`UPDATE bounty_assignments SET status = 'active' WHERE bounty_id = $1`, [b]);
+
+    const r = await post(erasureBody(77, 'late', SESSION_ERASURE_DOMAIN, 'erase_retaining_in_flight'));
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ erased: true, retainedInFlight: ['a bounty assignment in progress'] });
+    // Gone: everything that is about the person and not the money.
+    for (const t of ['link_nonces', 'contributor_snapshots', 'bounty_applications']) {
+      expect(await count(`SELECT count(*) AS n FROM ${t} WHERE github_user_id = $1`, [77]), t).toBe(0);
+    }
+    // Kept: the assignment, and the wallet its payout would go to (with the
+    // contributor row the link hangs from).
+    expect(await count(`SELECT count(*) AS n FROM bounty_assignments WHERE github_user_id = $1 AND status = 'active'`, [77])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1 AND revoked_at IS NULL`, [77])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM contributors WHERE github_user_id = $1`, [77])).toBe(1);
+    expect(await count(`SELECT count(*) AS n FROM account_erasures WHERE github_user_id = $1 AND cardinality(retained_in_flight) = 1`, [77])).toBe(1);
+    // The public ledger already shows the account as erased.
+    const payouts = (await api.ledger()).events.filter((e) => e.kind === 'payout').map((e) => e.detail);
+    expect(payouts.some((d) => d.includes('late'))).toBe(false);
+
+    // Still in flight: the finisher leaves it alone.
+    expect(await finishRetainedErasures(db)).toEqual([]);
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [77])).toBe(1);
+
+    // Once it is no longer in flight, the rest goes.
+    await db.query(`UPDATE bounty_assignments SET status = 'completed' WHERE bounty_id = $1`, [b]);
+    expect(await finishRetainedErasures(db)).toEqual([77]);
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [77])).toBe(0);
+    expect(await count(`SELECT count(*) AS n FROM contributors WHERE github_user_id = $1`, [77])).toBe(0);
+    expect(await count(`SELECT count(*) AS n FROM account_erasures WHERE github_user_id = $1 AND cardinality(retained_in_flight) = 0`, [77])).toBe(1);
+    expect(await finishRetainedErasures(db)).toEqual([]);
+  });
+
+  it('past the limit with only a payout in flight, keeps the payout row and nothing else', async () => {
+    const b = await contributor(78, 'owed');
+    await db.query(`UPDATE payouts SET status = 'approved', tx_signature = NULL WHERE bounty_id = $1`, [b]);
+    expect((await post(erasureBody(78, 'owed'))).status).toBe(409);
+
+    const r = await post(erasureBody(78, 'owed', SESSION_ERASURE_DOMAIN, 'erase_retaining_in_flight'));
+    expect(r.status).toBe(200);
+    // The payout carries its own recipient, so the wallet link is not needed.
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [78])).toBe(0);
+    expect(await count(`SELECT count(*) AS n FROM payouts WHERE recipient_github_user_id = $1 AND status = 'approved' AND recipient = 'wallet78'`, [78])).toBe(1);
+  });
+
+  it('refuses an erasure action it does not know', async () => {
+    await contributor(79, 'ada');
+    const r = await post(erasureBody(79, 'ada', SESSION_ERASURE_DOMAIN, 'erase_everything'));
+    expect(r.status).toBe(400);
+    expect(r.body).toMatchObject({ error: 'unknown_action' });
+    expect(await count(`SELECT count(*) AS n FROM wallet_links WHERE github_user_id = $1`, [79])).toBe(1);
   });
 });

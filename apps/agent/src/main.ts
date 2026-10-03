@@ -1,4 +1,5 @@
 import { startLinkNoncePruning } from '../../../packages/db/src/prune.ts';
+import { startErasureFinisher } from './erasure-service.ts';
 import { startEventSender } from './event-sender.ts';
 import { startDrawScheduler } from './scheduler.ts';
 import { createAgentServer } from './server.ts';
@@ -6,6 +7,7 @@ import { wire } from './wiring.ts';
 
 const { db, service, webhookSecret, cfg, publicApi, publicOrigins, payoutsApiToken, draw, linkCountersignKey, events, escrow, funded } = await wire();
 startLinkNoncePruning(db);
+startErasureFinisher(db);
 startDrawScheduler(draw, undefined, undefined, funded);
 startEventSender(events);
 const port = Number(process.env.AGENT_PORT ?? process.env.PORT ?? 3000);

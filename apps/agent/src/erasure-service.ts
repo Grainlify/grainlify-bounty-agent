@@ -22,6 +22,16 @@
 // funded that has not settled. Erasing then would strand the money; Grainlify
 // holds the request and asks again later.
 //
+// For 30 days at most (Grainlify's erasure.MaxHold). Past that Grainlify
+// sends the other erasure action, erase_retaining_in_flight, and the erasure
+// goes ahead without refusing - keeping what the money in flight still needs:
+// the payout, assignment and escrow rows (kept anyway), and, while an
+// assignment is active, the wallet link (with the contributor row it hangs
+// from), because a merged pull request is paid to the linked wallet
+// (service.ts runGate). account_erasures.retained_in_flight says what was
+// kept and why, and finishRetainedErasures removes it once nothing is in
+// flight any more.
+//
 // Idempotent: a second call for the same account finds nothing to remove and
 // succeeds, so a retry after a dropped response is harmless.
 
@@ -33,10 +43,19 @@ export const ERASED_LOGIN = 'erased account';
 export const ERASED_POOL_LOGIN = 'erased-account';
 
 export type EraseOutcome =
-  | { ok: true; removed: Record<string, number>; alreadyErased: boolean }
+  | { ok: true; removed: Record<string, number>; alreadyErased: boolean; retainedInFlight: string[] }
   | { ok: false; inFlight: string[] };
 
-export async function eraseAccount(db: pg.Pool, githubUserId: number): Promise<EraseOutcome> {
+export interface EraseOptions {
+  /**
+   * Go ahead even with money or work in flight, keeping what it needs. Only
+   * Grainlify's erase_retaining_in_flight action sets this, once the erasure
+   * has waited its 30 days.
+   */
+  retainInFlight?: boolean;
+}
+
+export async function eraseAccount(db: pg.Pool, githubUserId: number, opts: EraseOptions = {}): Promise<EraseOutcome> {
   const client = await db.connect();
   try {
     await client.query('BEGIN');
@@ -45,7 +64,8 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number): Promise<E
 
     const inFlight: string[] = [];
     const q = async (sql: string) => (await client.query<{ n: boolean }>(sql, [githubUserId])).rows[0]?.n === true;
-    if (await q(`SELECT EXISTS (SELECT 1 FROM bounty_assignments WHERE github_user_id = $1 AND status IN ('active','pr_submitted')) AS n`)) {
+    const assigned = await q(`SELECT EXISTS (SELECT 1 FROM bounty_assignments WHERE github_user_id = $1 AND status IN ('active','pr_submitted')) AS n`);
+    if (assigned) {
       inFlight.push('a bounty assignment in progress');
     }
     if (await q(`SELECT EXISTS (SELECT 1 FROM payouts WHERE recipient_github_user_id = $1 AND status IN ('awaiting_approval','approved','submitted')) AS n`)) {
@@ -55,10 +75,13 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number): Promise<E
                   WHERE b.funded_by_github_user_id = $1 AND e.state IN ('funding','funded','assigned')) AS n`)) {
       inFlight.push('a bounty you funded whose escrow has not settled');
     }
-    if (inFlight.length) {
+    if (inFlight.length && !opts.retainInFlight) {
       await client.query('ROLLBACK');
       return { ok: false, inFlight };
     }
+    // An active assignment is paid to the linked wallet when its pull request
+    // merges, so the link stays while it is in flight.
+    const keepWallet = opts.retainInFlight === true && assigned;
 
     const prior = await client.query(`SELECT 1 FROM account_erasures WHERE github_user_id = $1`, [githubUserId]);
 
@@ -78,12 +101,13 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number): Promise<E
     const run = async (name: string, sql: string) => {
       removed[name] = (await client.query(sql, [githubUserId])).rowCount ?? 0;
     };
-    await run('wallet_links', `DELETE FROM wallet_links WHERE github_user_id = $1`);
+    if (!keepWallet) await run('wallet_links', `DELETE FROM wallet_links WHERE github_user_id = $1`);
     await run('link_nonces', `DELETE FROM link_nonces WHERE github_user_id = $1`);
     await run('bounty_applications', `DELETE FROM bounty_applications WHERE github_user_id = $1`);
     await run('contributor_snapshots', `DELETE FROM contributor_snapshots WHERE github_user_id = $1`);
     await run('bounty_events', `DELETE FROM bounty_events WHERE github_user_id = $1`);
-    await run('contributors', `DELETE FROM contributors WHERE github_user_id = $1`);
+    // The wallet link references the contributor row, so it stays with it.
+    if (!keepWallet) await run('contributors', `DELETE FROM contributors WHERE github_user_id = $1`);
     // The pool is kept so a draw stays replayable; only the name inside it goes.
     await run(
       'bounty_draws.pool',
@@ -95,20 +119,55 @@ export async function eraseAccount(db: pg.Pool, githubUserId: number): Promise<E
         WHERE d.pool @> jsonb_build_array(jsonb_build_object('githubUserId', $1::bigint))`,
     );
 
+    // retained_in_flight is replaced, not merged: it says what is kept now.
+    // A later erasure with nothing in flight (finishRetainedErasures) empties it.
+    const retainedInFlight = inFlight;
     await client.query(
-      `INSERT INTO account_erasures (github_user_id, logins, removed) VALUES ($1, $2, $3)
+      `INSERT INTO account_erasures (github_user_id, logins, removed, retained_in_flight) VALUES ($1, $2, $3, $4)
        ON CONFLICT (github_user_id) DO UPDATE
-         SET logins = (SELECT array_agg(DISTINCT x) FROM unnest(account_erasures.logins || EXCLUDED.logins) x)`,
-      [githubUserId, logins.rows.map((r) => r.login), JSON.stringify(removed)],
+         SET logins = (SELECT array_agg(DISTINCT x) FROM unnest(account_erasures.logins || EXCLUDED.logins) x),
+             retained_in_flight = EXCLUDED.retained_in_flight`,
+      [githubUserId, logins.rows.map((r) => r.login), JSON.stringify(removed), retainedInFlight],
     );
     await client.query('COMMIT');
-    return { ok: true, removed, alreadyErased: (prior.rowCount ?? 0) > 0 };
+    return { ok: true, removed, alreadyErased: (prior.rowCount ?? 0) > 0, retainedInFlight };
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     throw e;
   } finally {
     client.release();
   }
+}
+
+/**
+ * Finishes erasures that went ahead with money in flight, once it is no longer
+ * in flight: erases again, without retaining, every account whose erasure kept
+ * something. One still in flight is refused by eraseAccount and changes
+ * nothing, so this is safe to run on every tick. Returns the accounts finished.
+ */
+export async function finishRetainedErasures(db: pg.Pool): Promise<number[]> {
+  const due = await db.query<{ id: string }>(
+    `SELECT github_user_id::text AS id FROM account_erasures WHERE cardinality(retained_in_flight) > 0`,
+  );
+  const finished: number[] = [];
+  for (const { id } of due.rows) {
+    const r = await eraseAccount(db, Number(id));
+    if (r.ok) finished.push(Number(id));
+  }
+  return finished;
+}
+
+/** Runs finishRetainedErasures now and then hourly. Returns a stop function. */
+export function startErasureFinisher(db: pg.Pool, log: (m: string) => void = console.log, everyMs = 60 * 60_000): () => void {
+  const sweep = () => {
+    finishRetainedErasures(db)
+      .then((ids) => ids.length > 0 && log(`finished ${ids.length} erasure(s) that had waited for money in flight`))
+      .catch((e) => log(`erasure finisher failed, continuing: ${e instanceof Error ? e.message : String(e)}`));
+  };
+  sweep();
+  const timer = setInterval(sweep, everyMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }
 
 /** The erased accounts, for masking what the public API shows. */

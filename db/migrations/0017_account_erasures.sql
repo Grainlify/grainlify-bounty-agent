@@ -21,5 +21,10 @@ CREATE TABLE IF NOT EXISTS account_erasures (
   logins          TEXT[] NOT NULL DEFAULT '{}',
   erased_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
   -- Rows removed per table, so "what did you delete" has an answer here too.
-  removed         JSONB NOT NULL DEFAULT '{}'::jsonb
+  removed         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  -- What was still in flight when Grainlify's 30-day limit made the erasure
+  -- go ahead anyway (erase_retaining_in_flight), and so what was kept for it.
+  -- Emptied when a later pass finds nothing in flight and finishes the
+  -- erasure (erasure-service.ts finishRetainedErasures).
+  retained_in_flight TEXT[] NOT NULL DEFAULT '{}'
 );
