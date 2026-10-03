@@ -18,6 +18,7 @@ import { FitService } from './fit-service.ts';
 import { assertMintsAgree } from './mint-check.ts';
 import { BountyService } from './service.ts';
 import { PublicApi, publicOrigins } from './public.ts';
+import { wireGrainhack } from './grainhack/wiring.ts';
 
 const need = (k: string) => {
   const v = process.env[k];
@@ -133,11 +134,14 @@ export async function wire() {
     secret: env.BOUNTY_EVENTS_SECRET?.trim() || undefined,
   };
   if (events.secret && events.secret.length < 32) throw new Error('BOUNTY_EVENTS_SECRET must be at least 32 characters');
+  // GrainHack payouts: their own network, signer and settings, off unless
+  // GRAINHACK_NETWORK is set. Nothing above reads them.
+  const grainhack = await wireGrainhack(env, db);
   return {
     db, gh, service, cfg, draw, linkCountersignKey, events,
     webhookSecret: app.webhook_secret,
-    escrow, funded,
-    publicApi: new PublicApi(db, cfg, { escrowMints: escrow?.mints(), funded }),
+    escrow, funded, grainhack,
+    publicApi: new PublicApi(db, cfg, { escrowMints: escrow?.mints(), funded, grainhackMints: grainhack?.cfg.mints }),
     publicOrigins: publicOrigins(env),
     payoutsApiToken,
   };

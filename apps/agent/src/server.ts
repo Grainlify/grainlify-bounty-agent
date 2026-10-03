@@ -9,6 +9,8 @@ import type { BountyService } from './service.ts';
 import type { DrawService } from './draw-service.ts';
 import type { EscrowService } from './escrow-service.ts';
 import type { FundedService } from './funded-service.ts';
+import type { GrainhackService } from './grainhack/service.ts';
+import type { GrainhackApproval } from '../../../packages/gate/src/grainhack-approval.ts';
 import { corsHeaders, type PublicApi } from './public.ts';
 import { verifySessionAction } from '../../../packages/gate/src/session-action.ts';
 import { eraseAccount } from './erasure-service.ts';
@@ -46,6 +48,11 @@ export interface ServerDeps {
   escrow?: EscrowService;
   /** Funded bounties' lifecycle: funding, assigning, unassigning, disputes. Present whenever `escrow` is. */
   funded?: FundedService;
+  /**
+   * GrainHack payouts (GRAINHACK_NETWORK set). Absent: the operator routes
+   * answer 503; the public view still reads whatever the database holds.
+   */
+  grainhack?: GrainhackService;
   /**
    * Applications, the draw and the admin controls. Absent in the tests that
    * only exercise the webhook and the link routes, so those routes answer 503
@@ -148,6 +155,11 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
         if (funder) {
           if (!d.funded) return pub(404, { error: 'not found' });
           return pub(200, { profile: await d.funded.profile(funder[1]!) });
+        }
+        const gh = /^\/public\/grainhack\/([0-9a-f-]{36})$/.exec(url.pathname);
+        if (gh) {
+          const view = await d.publicApi.grainhack(gh[1]!);
+          return view ? pub(200, view) : pub(404, { error: 'not found' });
         }
         const b = /^\/public\/bounties\/([0-9a-f-]{36})$/.exec(url.pathname);
         if (b) {
@@ -655,6 +667,29 @@ export function createAgentServer(d: ServerDeps): Server & { idle: () => Promise
           default:
             return reply(400, { error: 'unknown_action', detail: `no admin action named ${f.action}` });
         }
+      }
+
+      // GrainHack operator routes, used by `pnpm approve-event`. Bearer
+      // PAYOUTS_API_TOKEN on every one: the event view says who is held for
+      // KYC and where each winner is paid, and that is not public.
+      if (url.pathname.startsWith('/api/grainhack/')) {
+        if (!d.payoutsApiToken) return send(503, { error: 'payouts_api_token_not_configured' });
+        if (!bearerOk(req.headers.authorization, d.payoutsApiToken)) return send(401, { error: 'unauthorized' });
+        if (!d.grainhack) return send(503, { error: 'grainhack_not_configured' });
+        const ev = /^\/api\/grainhack\/events\/([0-9a-f-]{36})(\/refresh)?$/.exec(url.pathname);
+        if (ev && req.method === 'GET' && !ev[2]) return send(200, await d.grainhack.eventView(ev[1]!));
+        if (ev && req.method === 'POST' && ev[2]) {
+          const reconciled = await d.grainhack.reconcile(ev[1]!);
+          const wallets = await d.grainhack.refreshWallets(ev[1]!);
+          return send(200, { reconciled, walletsLinked: wallets, view: await d.grainhack.eventView(ev[1]!) });
+        }
+        const ap = /^\/api\/grainhack\/payouts\/([0-9a-f-]{36})\/approve$/.exec(url.pathname);
+        if (ap && req.method === 'POST') {
+          const body = JSON.parse((await readRaw(req, 64 * 1024)).toString('utf8')) as { approval: GrainhackApproval };
+          const r = await d.grainhack.approve(ap[1]!, body.approval);
+          return r.ok ? send(200, r) : send(r.status, { error: r.error, rowStatus: r.rowStatus ?? null });
+        }
+        return send(404, { error: 'not found' });
       }
 
       const m = /^\/api\/payouts\/([0-9a-f-]{36})(\/approve)?$/.exec(url.pathname);
