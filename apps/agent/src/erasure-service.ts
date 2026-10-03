@@ -14,7 +14,9 @@
 // What stays: payouts, submissions, reviews, draws and assignments - the
 // public ledger's rows - and GrainHack statements, payout rows and ledger
 // rows, which are payout records (the login inside a signed statement cannot
-// change; Grainlify erases its own copy five years after the payment). The ledger is a record of money paid and of public
+// change). Five years after the event's last payment the GrainHack ones go too,
+// except the ledger rows (grainhack/retention.ts), as Grainlify does with its
+// own copy. The ledger is a record of money paid and of public
 // decisions, and it is never edited silently. Instead account_erasures records
 // the erasure; the public API shows "erased account" wherever the login would
 // have appeared, and lists the erasure as a ledger event of its own.
