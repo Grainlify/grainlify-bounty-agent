@@ -207,7 +207,7 @@ export class GrainhackService {
     for (const row of r.rows) {
       await enqueueReport(db, {
         kind: 'grainhack_link_wallet', githubUserId: row.github_user_id, dedupeKey: `grainhack_link_wallet:${row.id}:${s.statement_id}`,
-        payload: { hackathon_id: s.hackathon_id, hackathon_name: s.hackathon_name, pool: s.pool, payout_id: row.id, login: row.login, amount_minor: row.amount_minor, currency: row.currency, network: row.network },
+        payload: { hackathon_id: s.hackathon_id, hackathon_name: s.hackathon_name, pool: s.pool, statement_id: s.statement_id, payout_id: row.id, login: row.login, amount_minor: row.amount_minor, currency: row.currency, network: row.network },
       });
     }
   }

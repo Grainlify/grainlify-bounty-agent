@@ -4,7 +4,7 @@
 
 import type pg from 'pg';
 import { compareMints } from '../mint-check.ts';
-import { BackendStatementSource, deliverReports, REPORT_TICK_MS, type ReporterDeps } from './backend.ts';
+import { BackendStatementSource, deliverReports, discoverStatements, REPORT_TICK_MS, type ReporterDeps } from './backend.ts';
 import { grainhackConfigFromEnv, type GrainhackConfig } from './config.ts';
 import { GrainhackService } from './service.ts';
 import { GrainhackSignerClient } from './signer-client.ts';
@@ -16,12 +16,12 @@ export interface GrainhackWiring {
   statements: BackendStatementSource | null;
 }
 
+/** Reports go to the backend's own GrainHack routes, with the statement token. */
 export function reporterFromEnv(env: NodeJS.ProcessEnv, db: pg.Pool): ReporterDeps {
   return {
     db,
     backendUrl: env.GRAINHACK_BACKEND_URL?.trim() || undefined,
-    path: env.GRAINHACK_REPORT_PATH?.trim() || undefined,
-    token: env.GRAINHACK_REPORT_TOKEN?.trim() || undefined,
+    token: env.GRAINHACK_STATEMENT_TOKEN?.trim() || undefined,
   };
 }
 
@@ -67,23 +67,33 @@ export async function wireGrainhack(env: NodeJS.ProcessEnv, db: pg.Pool, log: (l
     log('grainhack: GRAINHACK_SIGNER_URL/GRAINHACK_SIGNER_TOKEN not set; statements can be imported and shown, nothing can be paid');
   }
   const reporter = reporterFromEnv(env, db);
-  if (!reporter.backendUrl || !reporter.token) log('grainhack: GRAINHACK_BACKEND_URL or GRAINHACK_REPORT_TOKEN not set; winners will NOT be told they were paid');
+  if (!reporter.backendUrl || !reporter.token) log('grainhack: GRAINHACK_BACKEND_URL or GRAINHACK_STATEMENT_TOKEN not set; statements are not fetched and winners will NOT be told they were paid');
+  for (const old of ['GRAINHACK_REPORT_TOKEN', 'GRAINHACK_REPORT_PATH']) {
+    if (env[old]) log(`grainhack: ${old} is no longer read; reports use GRAINHACK_STATEMENT_TOKEN and the backend's /grainhack routes`);
+  }
   return { cfg, service: new GrainhackService({ db, cfg, signer }), reporter, statements: statementsFromEnv(env) };
 }
 
+/** How often the poll asks the backend for new statements: every tenth tick by default (5 minutes). */
+export const DISCOVER_EVERY_TICKS = 10;
+
 /**
- * The optional poll: reconciles in-flight rows with the signer's journal,
- * moves winners who have since linked a wallet to awaiting approval, and
- * delivers reports. It never sends money: an approval is always a person's.
- * New statements are not discovered here - the contract gives the agent no
- * endpoint to list them - so each statement is imported with the CLI.
+ * The poll: imports statements the backend has issued since the last look
+ * (every DISCOVER_EVERY_TICKS ticks, and on the first), reconciles in-flight
+ * rows with the signer's journal, moves winners who have since linked a
+ * wallet to awaiting approval, and delivers reports. It never sends money:
+ * an approval is always a person's.
  */
 export function startGrainhackPoll(w: GrainhackWiring, ms = Number(process.env.GRAINHACK_POLL_MS ?? REPORT_TICK_MS), log: (l: string) => void = console.log) {
   let running = false;
+  let ticks = 0;
   const tick = async () => {
     if (running) return;
     running = true;
     try {
+      if (w.statements && ticks++ % DISCOVER_EVERY_TICKS === 0) {
+        await discoverStatements({ db: w.reporter.db, source: w.statements, service: w.service, log });
+      }
       await w.service.reconcile();
       await w.service.refreshWallets();
       const n = await deliverReports(w.reporter);
@@ -96,5 +106,6 @@ export function startGrainhackPoll(w: GrainhackWiring, ms = Number(process.env.G
   };
   const timer = setInterval(() => void tick(), ms);
   timer.unref?.();
+  void tick();
   return { stop: () => clearInterval(timer) };
 }

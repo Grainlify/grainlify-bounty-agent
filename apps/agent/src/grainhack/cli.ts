@@ -4,6 +4,9 @@
 //   grainhack import <statement_id> [--file <json>] [--actor <login>]
 //       fetch the backend-signed results statement (or read {statement, signature}
 //       from a file), verify it, store it, and create or update the winner rows
+//   grainhack discover [<hackathon_id>]
+//       import whatever the backend has issued since the last look, for one
+//       event or for every settled one (what the agent's poll does)
 //   grainhack show <hackathon_id>
 //       the event's rows and totals, from this database
 //   grainhack pool-funded <hackathon_id> <tx_signature> --amount <usdc> --actor <login> [--currency USDC] [--note <text>]
@@ -19,7 +22,7 @@ import { readFileSync } from 'node:fs';
 import pg from 'pg';
 import { migrate } from '../../../../packages/db/src/pg.ts';
 import { formatAmount } from '../config.ts';
-import { deliverReports } from './backend.ts';
+import { deliverReports, discoverStatements } from './backend.ts';
 import { grainhackConfigFromEnv } from './config.ts';
 import { recordEvent1History, recordPoolFunding, SolanaDepositChain } from './ledger.ts';
 import { GrainhackService } from './service.ts';
@@ -71,6 +74,12 @@ export async function grainhackCli(sub: string | undefined, rest: string[]): Pro
       console.log(`${r.alreadyImported ? 'already imported' : 'imported'} statement ${r.statementId} for hackathon ${r.hackathonId}`);
       if (!r.alreadyImported) console.log(`  rows: ${r.created} created, ${r.updated} updated, ${r.kept} kept (already sent), ${r.removed} removed`);
       console.log(`  by status: ${Object.entries(r.byStatus).map(([k, v]) => `${k}=${v}`).join(' ') || 'none'}`);
+    } else if (sub === 'discover') {
+      const src = statementsFromEnv(env);
+      if (!src) throw new Error('GRAINHACK_BACKEND_URL and GRAINHACK_STATEMENT_TOKEN are required to discover statements');
+      const r = await discoverStatements({ db, source: src, service, log: console.log }, rest[0] ? [rest[0]] : undefined);
+      console.log(`checked ${r.checked} event(s); imported ${r.imported.length}; ${r.errors.length} error(s)`);
+      if (r.errors.length) process.exitCode = 1;
     } else if (sub === 'show' && rest[0]) {
       const v = await service.eventView(rest[0]);
       if (!v.statement && !v.rows.length) throw new Error('nothing imported for that hackathon');
@@ -101,6 +110,7 @@ export async function grainhackCli(sub: string | undefined, rest: string[]): Pro
     } else {
       console.error(
         'usage: grainhack import <statement_id> [--file <json>] [--actor <login>]\n' +
+          '     | grainhack discover [<hackathon_id>]\n' +
           '     | grainhack show <hackathon_id>\n' +
           '     | grainhack pool-funded <hackathon_id> <tx_signature> --amount <usdc> --actor <login> [--currency USDC] [--note <text>]\n' +
           '     | grainhack history-event1 <hackathon_id> --actor <login> [--name <event name>]\n' +

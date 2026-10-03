@@ -21,7 +21,7 @@ import { createGrainhackServer } from '../../../services/signer/src/grainhack/se
 import type { PayoutRail } from '../../../services/signer/src/payout/rail.ts';
 import { explorerTx, p2Config } from '../src/config.ts';
 import { approveEvent } from '../src/grainhack/approve-event.ts';
-import { BackendStatementSource, deliverReports } from '../src/grainhack/backend.ts';
+import { BackendStatementSource, deliverReports, discoverStatements, enqueueReport } from '../src/grainhack/backend.ts';
 import { grainhackConfigFromEnv, type GrainhackConfig } from '../src/grainhack/config.ts';
 import { parseAmount } from '../src/grainhack/cli.ts';
 import { EVENT1_KEEPERHUB_HISTORY, publicStatus, recordEvent1History, recordPoolFunding, type DepositFacts } from '../src/grainhack/ledger.ts';
@@ -351,17 +351,81 @@ describe.skipIf(!dbUrl)('GrainHack payouts on the agent', () => {
     expect(explorerTx('base-sepolia', '0xabc')).toBe('https://sepolia.basescan.org/tx/0xabc');
   });
 
-  it('delivers reports to a configurable backend path with a bearer token, once each', async () => {
-    await service.importStatement(makeStatement(lines([303, 'carol', 2.5])), 't');
-    const calls: { url: string; auth: string | null; body: { kind: string; github_user_id: number } }[] = [];
+  it('delivers reports to the backend\'s own routes with the statement token, once each; a named refusal is final', async () => {
+    const carol = makeStatement(lines([303, 'carol', 2.5]));
+    await service.importStatement(carol, 't');
+    const calls: { url: string; auth: string | null; body: Record<string, unknown> }[] = [];
+    let answer = () => new Response(JSON.stringify({ notified: [303], skipped: [] }), { status: 200 });
     const f = (async (url: string, init: RequestInit) => {
       calls.push({ url, auth: new Headers(init.headers).get('authorization'), body: JSON.parse(String(init.body)) });
-      return new Response('{}', { status: 200 });
+      return answer();
     }) as typeof fetch;
-    expect(await deliverReports({ db, backendUrl: 'https://api.example/', path: '/v2/grainhack/events', token: 'report-token', f })).toBe(1);
-    expect(await deliverReports({ db, backendUrl: 'https://api.example/', path: '/v2/grainhack/events', token: 'report-token', f })).toBe(0);
-    expect(calls).toEqual([{ url: 'https://api.example/v2/grainhack/events', auth: 'Bearer report-token', body: expect.objectContaining({ kind: 'grainhack_link_wallet', github_user_id: 303 }) }]);
+    const deps = { db, backendUrl: 'https://api.example/', token: 'statement-token', f, log: () => {} };
+    expect(await deliverReports(deps)).toBe(1);
+    expect(await deliverReports(deps)).toBe(0);
+    expect(calls).toEqual([{ url: 'https://api.example/grainhack/awaiting-wallet', auth: 'Bearer statement-token', body: { statement_id: idOf(carol), github_user_ids: [303] } }]);
     expect(await deliverReports({ db, backendUrl: undefined, token: 'x', f })).toBe(0);
+
+    // A payment report carries exactly what POST /grainhack/payments takes.
+    await enqueueReport(db, { kind: 'grainhack_paid', githubUserId: 303, dedupeKey: 'paid-1', payload: {
+      hackathon_id: HACK, statement_id: idOf(carol), login: 'carol', amount_minor: '2500000', currency: 'USDC', network: 'solana-devnet',
+      recipient: FLOAT, tx_signature: 'TxSig', tx_url: 'x', payout_id: 'p' } });
+    answer = () => new Response(JSON.stringify({ error: 'service_unavailable' }), { status: 503 });
+    expect(await deliverReports(deps)).toBe(0);
+    answer = () => new Response(JSON.stringify({ accepted: true, duplicate: false, notified: true }), { status: 200 });
+    expect(await deliverReports(deps)).toBe(1);
+    expect(calls.slice(-1)).toEqual([{ url: 'https://api.example/grainhack/payments', auth: 'Bearer statement-token', body: {
+      statement_id: idOf(carol), github_user_id: 303, amount_minor: '2500000', currency: 'USDC', network: 'solana-devnet', tx_signature: 'TxSig', recipient: FLOAT } }]);
+    const paid = (await db.query(`SELECT attempts, delivered_at FROM grainhack_reports WHERE dedupe_key = 'paid-1'`)).rows[0];
+    expect(paid).toMatchObject({ attempts: 2, delivered_at: expect.any(Date) });
+
+    // 409 conflicting_payment: kept with its error, never sent again.
+    await enqueueReport(db, { kind: 'grainhack_paid', githubUserId: 303, dedupeKey: 'paid-2', payload: { statement_id: idOf(carol), amount_minor: '2500000' } });
+    answer = () => new Response(JSON.stringify({ error: 'conflicting_payment' }), { status: 409 });
+    const before = calls.length;
+    expect(await deliverReports(deps)).toBe(0);
+    expect(await deliverReports(deps)).toBe(0);
+    expect(calls.length).toBe(before + 1);
+    expect((await db.query(`SELECT attempts, last_error FROM grainhack_reports WHERE dedupe_key = 'paid-2'`)).rows[0]).toMatchObject({ attempts: 10, last_error: expect.stringContaining('conflicting_payment') });
+  });
+
+  it('discovers new statements by polling the latest per settled event, walking back through supersedes', async () => {
+    const held = makeStatement(lines([101, 'alice', 4], [202, 'bob', 3.5, 'held_kyc']));
+    const cleared = makeStatement(lines([101, 'alice', 4], [202, 'bob', 3.5]), { supersedes: idOf(held) });
+    const byId = new Map([held, cleared].map((s) => [idOf(s), s]));
+    let head: typeof held | null = null;
+    const seen: string[] = [];
+    const f = (async (url: string, init: RequestInit) => {
+      const u = new URL(url);
+      seen.push(`${u.pathname} ${new Headers(init.headers).get('authorization') ?? '-'}`);
+      if (u.pathname === '/hackathons') return new Response(JSON.stringify({ hackathons: [{ id: HACK, phase: 'settled' }, { id: COMPUTATION, phase: 'live' }] }));
+      if (u.pathname === `/grainhack/hackathons/${HACK}/results-statement`) return head ? new Response(JSON.stringify(head)) : new Response('{"error":"not_found"}', { status: 404 });
+      const m = /^\/grainhack\/results-statements\/(.+)$/.exec(u.pathname);
+      const st = m && byId.get(m[1]!);
+      return st ? new Response(JSON.stringify(st)) : new Response('{}', { status: 404 });
+    }) as typeof fetch;
+    const source = new BackendStatementSource('https://api.example', 'statement-token', f);
+
+    expect(await discoverStatements({ db, source, service })).toMatchObject({ checked: 1, imported: [], errors: [] });
+    expect(seen).toEqual(['/hackathons -', `/grainhack/hackathons/${HACK}/results-statement Bearer statement-token`]);
+
+    // Issued while the agent was not looking: both, oldest first.
+    head = cleared;
+    const r = await discoverStatements({ db, source, service });
+    expect(r.imported.map((x) => x.statementId)).toEqual([idOf(held), idOf(cleared)]);
+    expect((await service.currentStatement(HACK))?.statement_id).toBe(idOf(cleared));
+    expect([...(await rows()).values()].map((x) => [x.statement_id, x.status])).toEqual([[idOf(cleared), 'awaiting_wallet'], [idOf(cleared), 'awaiting_wallet']]);
+    // Nothing new: nothing imported, nothing fetched beyond the head.
+    seen.length = 0;
+    expect((await discoverStatements({ db, source, service })).imported).toEqual([]);
+    expect(seen.filter((x) => x.includes('/results-statements/'))).toEqual([]);
+
+    // A new head signed by any other key is reported, not imported.
+    head = signed(resultsKey(Buffer.alloc(32, 6)), statement({ statement_id: uuid(), supersedes: idOf(cleared), hackathon_id: HACK, computation_id: COMPUTATION,
+      lines: lines([101, 'alice', 4], [202, 'bob', 3.5]), pool_minor: '7500000' }));
+    const bad = await discoverStatements({ db, source, service }, [HACK]);
+    expect(bad).toMatchObject({ imported: [], errors: [{ hackathonId: HACK, error: expect.stringMatching(/signature does not verify/) }] });
+    expect((await service.currentStatement(HACK))?.statement_id).toBe(idOf(cleared));
   });
 });
 
