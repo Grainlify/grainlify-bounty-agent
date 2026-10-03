@@ -6,6 +6,9 @@
 //                                         create a bounty at a chosen amount, with no
 //                                         inference call and no GitHub comment
 //   approve <payout-id>                   show a payout, confirm, sign with the approver key, submit
+//   grainhack <import|show|pool-funded|history-event1|refreeze|deliver-reports> ...
+//                                         GrainHack payouts; see grainhack/cli.ts. Approving them is
+//                                         `pnpm approve-event <hackathon_id>`
 //   bounty close <bounty-id> --actor <login> --reason <text>
 //                                         cancel an open bounty and release its holder as our
 //                                         decision (no abandon); they are told the reason
@@ -67,6 +70,8 @@ async function approve(payoutId: string) {
 
 async function main() {
   if (cmd === 'approve' && sub) return approve(sub);
+  // GrainHack has its own settings and needs only the database: see grainhack/cli.ts.
+  if (cmd === 'grainhack') return (await import('./grainhack/cli.ts')).grainhackCli(sub, rest);
   const { service, db } = await (await import('./wiring.ts')).wire();
   try {
     if (cmd === 'repo' && sub === 'add' && rest[0]) {
@@ -161,7 +166,8 @@ async function main() {
           '     | bounty propose <owner/name> <issue> [currency]\n' +
           '     | bounty seed <owner/name> <issue> <usd> [--test] [--newcomers] [--waive <rule>] [--title <t>] [--currency <c>]\n' +
           '     | bounty reopen <bounty-id> --actor <login> [--hold]\n' +
-          '     | approve <payout-id>',
+          '     | approve <payout-id>\n' +
+          '     | grainhack <import|show|pool-funded|history-event1|refreeze|deliver-reports> ...  (see apps/agent/src/grainhack/cli.ts)',
       );
       process.exitCode = 2;
     }

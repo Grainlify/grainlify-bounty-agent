@@ -18,7 +18,8 @@
     "approve": "tsx apps/agent/src/cli.ts approve",
     "payout-signer": "tsx services/signer/src/payout/main.ts",
     "grainhack-signer": "tsx services/signer/src/grainhack/main.ts",
-    "grainhack-resolve": "tsx services/signer/src/grainhack/resolve-cli.ts"
+    "grainhack-resolve": "tsx services/signer/src/grainhack/resolve-cli.ts",
+    "approve-event": "tsx apps/agent/src/grainhack/approve-event-cli.ts"
   },
   "devDependencies": {
     "@types/node": "26.6.1",
