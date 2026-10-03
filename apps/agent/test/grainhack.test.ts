@@ -24,7 +24,7 @@ import { approveEvent } from '../src/grainhack/approve-event.ts';
 import { BackendStatementSource, deliverReports, discoverStatements, enqueueReport } from '../src/grainhack/backend.ts';
 import { grainhackConfigFromEnv, type GrainhackConfig } from '../src/grainhack/config.ts';
 import { parseAmount } from '../src/grainhack/cli.ts';
-import { EVENT1_KEEPERHUB_HISTORY, publicStatus, recordEvent1History, recordPoolFunding, type DepositFacts } from '../src/grainhack/ledger.ts';
+import { EVENT1_HACKATHON_ID, EVENT1_HACKATHON_NAME, EVENT1_KEEPERHUB_HISTORY, publicStatus, recordEvent1History, recordPoolFunding, type DepositFacts } from '../src/grainhack/ledger.ts';
 import { GrainhackService } from '../src/grainhack/service.ts';
 import { GrainhackSignerClient } from '../src/grainhack/signer-client.ts';
 import { PublicApi } from '../src/public.ts';
@@ -335,8 +335,14 @@ describe.skipIf(!dbUrl)('GrainHack payouts on the agent', () => {
   });
 
   it('event 1\'s KeeperHub legs appear once, as testnet history on Base Sepolia, on the ledger and the event page', async () => {
-    expect(await recordEvent1History(db, { hackathonId: HACK, hackathonName: 'GrainHack #1', actor: 'op' })).toBe(2);
+    const HACK = EVENT1_HACKATHON_ID;
+    await expect(recordEvent1History(db, { hackathonId: COMPUTATION, actor: 'op' })).rejects.toThrow(/event 1 is e11e77b0/);
+    expect(await recordEvent1History(db, { actor: 'op' })).toBe(2);
     expect(await recordEvent1History(db, { hackathonId: HACK, actor: 'op' })).toBe(0);
+    expect((await db.query(`SELECT login, github_user_id::text AS id, hackathon_name FROM grainhack_ledger ORDER BY at`)).rows).toEqual([
+      { login: 'Baskarayelu', id: '198364062', hackathon_name: EVENT1_HACKATHON_NAME },
+      { login: 'arisu6804', id: '293078336', hackathon_name: EVENT1_HACKATHON_NAME },
+    ]);
     const ledger = await (await fetch(`${agentUrl}/public/ledger`)).json();
     const gh = ledger.events.filter((e: { kind: string }) => e.kind.startsWith('grainhack_'));
     expect(gh).toHaveLength(2);

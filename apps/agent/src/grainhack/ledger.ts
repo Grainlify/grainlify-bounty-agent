@@ -95,29 +95,40 @@ export async function recordPoolFunding(
 
 // --- event 1 history ---------------------------------------------------------
 
+/** Event 1: "First GrainHack Event (Base Sepolia)" (public: api.grainlify.com/hackathons). */
+export const EVENT1_HACKATHON_ID = 'e11e77b0-8d8d-40c5-a8dd-b525a491374b';
+export const EVENT1_HACKATHON_NAME = 'First GrainHack Event (Base Sepolia)';
+
 /**
  * Event 1's two GrainHack payouts, made through KeeperHub on Base Sepolia on
  * 19 September 2026 (IST) before this path existed. Test USDC with no value.
  * From the archived KeeperHub legs; recorded as history, never as payouts
- * made by the grainhack-signer.
+ * made by the grainhack-signer. The GitHub user ids are public (api.github.com
+ * /users/<login>) and key the rows the way every other payout row is keyed,
+ * so the command needs no lookup and an erased account is masked like any other.
  */
 export const EVENT1_KEEPERHUB_HISTORY = [
-  { login: 'Baskarayelu', amountMinor: '4000000', tx: '0xf54c1f583103af5342865909ea0c5df35d464aee340e16da82b621adebaae7b6', at: '2026-09-18T21:30:00Z' },
-  { login: 'arisu6804', amountMinor: '4000000', tx: '0x0b4c2ba2f74b60045145c01c7260da0393d79676350456ebc319028b1ac9221c', at: '2026-09-18T22:25:00Z' },
+  { login: 'Baskarayelu', githubUserId: 198364062, amountMinor: '4000000', tx: '0xf54c1f583103af5342865909ea0c5df35d464aee340e16da82b621adebaae7b6', at: '2026-09-18T21:30:00Z' },
+  { login: 'arisu6804', githubUserId: 293078336, amountMinor: '4000000', tx: '0x0b4c2ba2f74b60045145c01c7260da0393d79676350456ebc319028b1ac9221c', at: '2026-09-18T22:25:00Z' },
 ] as const;
 
 export const EVENT1_HISTORY_NOTE = 'Testnet history: paid through KeeperHub on Base Sepolia before the Solana payout path existed. Test USDC with no value; pro-rata, not the published figures.';
 
-/** Idempotent: a second run records nothing. Returns how many rows it added. */
-export async function recordEvent1History(db: pg.Pool, a: { hackathonId: string; hackathonName?: string; actor: string }): Promise<number> {
-  if (!/^[0-9a-f-]{36}$/.test(a.hackathonId)) throw new Error('hackathon id must be a uuid');
+/**
+ * Idempotent: a second run records nothing. Returns how many rows it added.
+ * Only for event 1: these are its legs, and recording them under any other
+ * event would put a false row on a public ledger.
+ */
+export async function recordEvent1History(db: pg.Pool, a: { hackathonId?: string; hackathonName?: string; actor: string }): Promise<number> {
+  const hackathonId = a.hackathonId ?? EVENT1_HACKATHON_ID;
+  if (hackathonId !== EVENT1_HACKATHON_ID) throw new Error(`these are event 1's KeeperHub legs; event 1 is ${EVENT1_HACKATHON_ID}, not ${hackathonId}`);
   if (!a.actor.trim()) throw new Error('--actor is required');
   let added = 0;
   for (const h of EVENT1_KEEPERHUB_HISTORY) {
     const r = await db.query(
-      `INSERT INTO grainhack_ledger (kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor, tx_signature, login, is_history, note, recorded_by, at)
-       VALUES ('grainhack_payout', $1, $2, 'base-sepolia', 'USDC', 6, $3, $4, $5, true, $6, $7, $8) ON CONFLICT (network, tx_signature, kind) DO NOTHING`,
-      [a.hackathonId, a.hackathonName ?? null, h.amountMinor, h.tx, h.login, EVENT1_HISTORY_NOTE, a.actor, h.at],
+      `INSERT INTO grainhack_ledger (kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor, tx_signature, login, github_user_id, is_history, note, recorded_by, at)
+       VALUES ('grainhack_payout', $1, $2, 'base-sepolia', 'USDC', 6, $3, $4, $5, $6, true, $7, $8, $9) ON CONFLICT (network, tx_signature, kind) DO NOTHING`,
+      [hackathonId, a.hackathonName ?? EVENT1_HACKATHON_NAME, h.amountMinor, h.tx, h.login, h.githubUserId, EVENT1_HISTORY_NOTE, a.actor, h.at],
     );
     added += r.rowCount ?? 0;
   }

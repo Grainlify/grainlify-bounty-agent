@@ -11,8 +11,10 @@
 //       the event's rows and totals, from this database
 //   grainhack pool-funded <hackathon_id> <tx_signature> --amount <usdc> --actor <login> [--currency USDC] [--note <text>]
 //       record a deposit to the GrainHack float after reading it from the chain
-//   grainhack history-event1 <hackathon_id> --actor <login> [--name <event name>]
-//       record event 1's two KeeperHub legs on Base Sepolia as testnet history
+//   grainhack history-event1 [<hackathon_id>] --actor <login> [--name <event name>]
+//       record event 1's two KeeperHub legs on Base Sepolia as testnet history;
+//       event 1's id, the winners' GitHub ids and the transactions are in the
+//       code (ledger.ts), and a second run adds nothing
 //   grainhack refreeze <payout_id> --actor <login> --reason <text>
 //       re-read a winner's live wallet link for a row not yet approved
 //   grainhack deliver-reports
@@ -99,8 +101,9 @@ export async function grainhackCli(sub: string | undefined, rest: string[]): Pro
       );
       if (!r.ok) throw new Error(r.error);
       console.log(`${r.recorded ? 'recorded' : 'already recorded'}: ${formatAmount(BigInt(r.amountMinor), decimals, currency)} into ${r.account} at ${r.at}`);
-    } else if (sub === 'history-event1' && rest[0]) {
-      const n = await recordEvent1History(db, { hackathonId: rest[0], hackathonName: flag('name'), actor });
+    } else if (sub === 'history-event1') {
+      const id = rest[0] && !rest[0].startsWith('--') ? rest[0] : undefined;
+      const n = await recordEvent1History(db, { hackathonId: id, hackathonName: flag('name'), actor });
       console.log(n ? `recorded ${n} testnet history row(s) for event 1` : 'already recorded; nothing added');
     } else if (sub === 'refreeze' && rest[0]) {
       const r = await service.refreeze(rest[0], actor, flag('reason') ?? '');
@@ -113,7 +116,7 @@ export async function grainhackCli(sub: string | undefined, rest: string[]): Pro
           '     | grainhack discover [<hackathon_id>]\n' +
           '     | grainhack show <hackathon_id>\n' +
           '     | grainhack pool-funded <hackathon_id> <tx_signature> --amount <usdc> --actor <login> [--currency USDC] [--note <text>]\n' +
-          '     | grainhack history-event1 <hackathon_id> --actor <login> [--name <event name>]\n' +
+          '     | grainhack history-event1 [<hackathon_id>] --actor <login> [--name <event name>]\n' +
           '     | grainhack refreeze <payout_id> --actor <login> --reason <text>\n' +
           '     | grainhack deliver-reports',
       );
