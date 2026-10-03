@@ -180,6 +180,7 @@ interface LedgerRow {
   kind: 'grainhack_pool_funded' | 'grainhack_payout';
   hackathon_id: string;
   hackathon_name: string | null;
+  pool: string;
   network: string;
   currency: string;
   decimals: number;
@@ -192,7 +193,7 @@ interface LedgerRow {
   note: string | null;
   at: Date;
 }
-const LEDGER_COLS = `kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor::text AS amount_minor, tx_signature, login, github_user_id::text AS github_user_id, payout_id, is_history, note, at`;
+const LEDGER_COLS = `kind, hackathon_id, hackathon_name, pool, network, currency, decimals, amount_minor::text AS amount_minor, tx_signature, login, github_user_id::text AS github_user_id, payout_id, is_history, note, at`;
 
 export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, decimalsFor: (currency: string) => number = () => 6) {
   if (!/^[0-9a-f-]{36}$/.test(hackathonId)) return null;
@@ -205,8 +206,8 @@ export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, dec
       WHERE hackathon_id = $1 AND pool = 'contributor' AND superseded_by IS NULL`,
     [hackathonId],
   )).rows[0];
-  const rows = (await db.query<{ login: string; github_user_id: string; amount_minor: string; currency: string; network: string; status: string; tx_signature: string | null; paid_at: Date | null }>(
-    `SELECT login, github_user_id::text AS github_user_id, amount_minor::text AS amount_minor, currency, network, status, tx_signature, paid_at FROM grainhack_payouts
+  const rows = (await db.query<{ id: string; login: string; github_user_id: string; amount_minor: string; currency: string; network: string; status: string; tx_signature: string | null; paid_at: Date | null }>(
+    `SELECT id, login, github_user_id::text AS github_user_id, amount_minor::text AS amount_minor, currency, network, status, tx_signature, paid_at FROM grainhack_payouts
       WHERE hackathon_id = $1 AND pool = 'contributor' AND status <> 'removed' ORDER BY lower(login)`,
     [hackathonId],
   )).rows;
@@ -223,6 +224,18 @@ export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, dec
       test: r.network !== 'solana-mainnet', history: false, note: null,
     };
   });
+  // A payment whose payout row the retention pass has removed (retention.ts):
+  // an erased account's, five years on. The ledger row is the record of it and
+  // is never edited, so the payment is still listed, from that row, as before.
+  const rowIds = new Set(rows.map((r) => r.id));
+  for (const l of ledger) {
+    if (l.kind !== 'grainhack_payout' || l.is_history || l.pool !== 'contributor' || !l.payout_id || rowIds.has(l.payout_id)) continue;
+    winners.push({
+      login: show(l.login, l.github_user_id), amountMinor: l.amount_minor, decimals: l.decimals, currency: l.currency, network: l.network, amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
+      status: 'paid', txSignature: l.tx_signature, txUrl: explorerTx(l.network, l.tx_signature), paidAt: new Date(l.at).toISOString(),
+      test: l.network !== 'solana-mainnet', history: false, note: null,
+    });
+  }
   const history: PublicGrainhackWinner[] = ledger
     .filter((l) => l.kind === 'grainhack_payout' && l.is_history)
     .map((l) => ({
