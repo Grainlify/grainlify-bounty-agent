@@ -24,6 +24,8 @@ export interface AgentConfig {
 export function explorerTx(network: string, sig: string): string {
   if (network === 'solana-mainnet') return `https://solscan.io/tx/${sig}`;
   if (network === 'solana-devnet') return `https://solscan.io/tx/${sig}?cluster=devnet`;
+  // Event 1's GrainHack legs, paid through KeeperHub before the Solana path existed.
+  if (network === 'base-sepolia') return `https://sepolia.basescan.org/tx/${sig}`;
   return `(${network}) ${sig}`;
 }
 
