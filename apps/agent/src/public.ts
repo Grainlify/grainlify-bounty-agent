@@ -453,7 +453,8 @@ export class PublicApi {
     }
     // GrainHack: pool deposits and payouts, from their append-only ledger.
     const grainhack = await grainhackLedgerRows(this.db).catch(() => []);
-    for (const g of grainhack) events.push(grainhackLedgerEvent(g));
+    const erasedForGrainhack = grainhack.length ? await loadErased(this.db) : undefined;
+    for (const g of grainhack) events.push(grainhackLedgerEvent(g, erasedForGrainhack));
     events.sort((a, b) => b.at.localeCompare(a.at));
 
     const totals = mock ? null : await new PgSpendLedger(this.db, budgetConfig()).totals();

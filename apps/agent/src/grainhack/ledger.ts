@@ -7,6 +7,7 @@ import { Connection, PublicKey } from '@solana/web3.js';
 import { getAssociatedTokenAddressSync, TOKEN_2022_PROGRAM_ID, TOKEN_PROGRAM_ID } from '@solana/spl-token';
 import type pg from 'pg';
 import { explorerTx } from '../config.ts';
+import { loadErased, shownLogin, type ErasedSet } from '../erasure-service.ts';
 import type { GrainhackConfig } from './config.ts';
 
 // --- pool deposits --------------------------------------------------------
@@ -185,22 +186,27 @@ interface LedgerRow {
   amount_minor: string;
   tx_signature: string;
   login: string | null;
+  github_user_id: string | null;
   payout_id: string | null;
   is_history: boolean;
   note: string | null;
   at: Date;
 }
-const LEDGER_COLS = `kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor::text AS amount_minor, tx_signature, login, payout_id, is_history, note, at`;
+const LEDGER_COLS = `kind, hackathon_id, hackathon_name, network, currency, decimals, amount_minor::text AS amount_minor, tx_signature, login, github_user_id::text AS github_user_id, payout_id, is_history, note, at`;
 
 export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, decimalsFor: (currency: string) => number = () => 6) {
   if (!/^[0-9a-f-]{36}$/.test(hackathonId)) return null;
+  // An account erased at its owner's request keeps its rows and loses its
+  // name here, as on the rest of the public ledger (erasure-service.ts).
+  const erased = await loadErased(db);
+  const show = (login: string | null, id: string | null) => shownLogin(erased, login, id) ?? '';
   const st = (await db.query<{ hackathon_name: string; pool: string; currency: string; network: string; pool_minor: string; issued_at: Date }>(
     `SELECT hackathon_name, pool, currency, network, pool_minor::text AS pool_minor, issued_at FROM grainhack_statements
       WHERE hackathon_id = $1 AND pool = 'contributor' AND superseded_by IS NULL`,
     [hackathonId],
   )).rows[0];
-  const rows = (await db.query<{ login: string; amount_minor: string; currency: string; network: string; status: string; tx_signature: string | null; paid_at: Date | null }>(
-    `SELECT login, amount_minor::text AS amount_minor, currency, network, status, tx_signature, paid_at FROM grainhack_payouts
+  const rows = (await db.query<{ login: string; github_user_id: string; amount_minor: string; currency: string; network: string; status: string; tx_signature: string | null; paid_at: Date | null }>(
+    `SELECT login, github_user_id::text AS github_user_id, amount_minor::text AS amount_minor, currency, network, status, tx_signature, paid_at FROM grainhack_payouts
       WHERE hackathon_id = $1 AND pool = 'contributor' AND status <> 'removed' ORDER BY lower(login)`,
     [hackathonId],
   )).rows;
@@ -212,7 +218,7 @@ export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, dec
     const status = publicStatus(r.status);
     const tx = status === 'paid' ? r.tx_signature : null;
     return {
-      login: r.login, amountMinor: r.amount_minor, decimals, currency: r.currency, network: r.network, amount: fmt(r.amount_minor, decimals, r.currency, r.network), status,
+      login: show(r.login, r.github_user_id), amountMinor: r.amount_minor, decimals, currency: r.currency, network: r.network, amount: fmt(r.amount_minor, decimals, r.currency, r.network), status,
       txSignature: tx, txUrl: tx ? explorerTx(r.network, tx) : null, paidAt: status === 'paid' && r.paid_at ? new Date(r.paid_at).toISOString() : null,
       test: r.network !== 'solana-mainnet', history: false, note: null,
     };
@@ -220,7 +226,7 @@ export async function publicGrainhackEvent(db: pg.Pool, hackathonId: string, dec
   const history: PublicGrainhackWinner[] = ledger
     .filter((l) => l.kind === 'grainhack_payout' && l.is_history)
     .map((l) => ({
-      login: l.login ?? '', amountMinor: l.amount_minor, decimals: l.decimals, currency: l.currency, network: l.network, amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
+      login: show(l.login, l.github_user_id), amountMinor: l.amount_minor, decimals: l.decimals, currency: l.currency, network: l.network, amount: fmt(l.amount_minor, l.decimals, l.currency, l.network),
       status: 'paid', txSignature: l.tx_signature, txUrl: explorerTx(l.network, l.tx_signature), paidAt: new Date(l.at).toISOString(),
       test: l.network !== 'solana-mainnet', history: true, note: l.note,
     }));
@@ -258,11 +264,13 @@ export async function grainhackLedgerRows(db: pg.Pool, limit = 300): Promise<Led
   return (await db.query<LedgerRow>(`SELECT ${LEDGER_COLS} FROM grainhack_ledger ORDER BY at DESC, id DESC LIMIT $1`, [limit])).rows;
 }
 
-export function grainhackLedgerEvent(l: LedgerRow) {
+/** One ledger row as a public ledger event. `erased` masks an erased account's login, as everywhere else on the ledger. */
+export function grainhackLedgerEvent(l: LedgerRow, erased?: ErasedSet) {
   const name = l.hackathon_name ?? 'event';
+  const login = erased ? shownLogin(erased, l.login, l.github_user_id) : l.login;
   const detail = l.kind === 'grainhack_pool_funded'
     ? `GrainHack ${name} pool funded`
-    : `GrainHack ${name} → ${l.login ?? 'winner'}${l.is_history ? ' (testnet history, KeeperHub on Base Sepolia)' : ''}`;
+    : `GrainHack ${name} → ${login ?? 'winner'}${l.is_history ? ' (testnet history, KeeperHub on Base Sepolia)' : ''}`;
   return {
     at: new Date(l.at).toISOString(),
     kind: l.kind,
